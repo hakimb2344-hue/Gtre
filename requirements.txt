@@ -1,5 +1,5 @@
-python-telegram-bot==20.3
-groq==0.9.0
-fpdf2==2.7.4
-arabic-reshaper==2.1.4
+python-telegram-bot==21.10
+groq==0.18.0
+fpdf2==2.8.2
+arabic-reshaper==3.0.0
 python-bidi==0.4.2
