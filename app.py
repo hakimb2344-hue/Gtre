@@ -3,9 +3,13 @@ import json
 import os
 import random
 import re
+import time
+import asyncio
 from datetime import datetime
 from typing import Dict, Optional, List
 from enum import Enum
+import hashlib
+from dataclasses import dataclass, asdict
 
 from telegram import Update
 from telegram.ext import (
@@ -17,6 +21,9 @@ from telegram.ext import (
     filters
 )
 from groq import Groq
+from fpdf import FPDF
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 # ==================== الإعدادات الأساسية ====================
 
@@ -26,117 +33,30 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# التوكنات والمفاتيح
 TELEGRAM_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
 GROQ_API_KEY = "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"
 ADMIN_ID = 8443969410
 BOOK_PRICE = 25
 
+# حالات المحادثة
 DISCUSSION = 1
+
+# إعدادات التبريد
+COOLDOWN_BETWEEN_CHUNKS = 2  # ثواني بين أجزاء الكتاب
+MAX_CHUNK_SIZE = 1500  # حجم الجزء الواحد من الكتاب
+MAX_RETRIES = 3  # عدد محاولات إعادة المحاولة عند الفشل
 
 # مجلدات التخزين
 DATA_DIR = "bot_data"
 USERS_FILE = f"{DATA_DIR}/users.json"
 BOOKS_DIR = f"{DATA_DIR}/books"
+TEMP_DIR = f"{DATA_DIR}/temp"
+CACHE_DIR = f"{DATA_DIR}/cache"
 
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(BOOKS_DIR, exist_ok=True)
-
-# ==================== أنماط الزخرفة ====================
-
-class DecorationStyle:
-    """أنماط زخرفة مختلفة للعناوين الإنجليزية"""
-    
-    STYLES = {
-        'default': {
-            'prefix': '📚 ',
-            'suffix': ' 📚',
-            'format': lambda x: x
-        },
-        'bold': {
-            'prefix': '𝐁𝐨𝐨𝐤: ',
-            'suffix': '',
-            'format': lambda x: ''.join(chr(ord(c) + 119743) if 'A' <= c <= 'Z' or 'a' <= c <= 'z' else c for c in x)
-        },
-        'italic': {
-            'prefix': '📖 ',
-            'suffix': ' 📖',
-            'format': lambda x: x.upper()
-        },
-        'fancy': {
-            'prefix': '✨『',
-            'suffix': '』✨',
-            'format': lambda x: x.title()
-        },
-        'gothic': {
-            'prefix': '𝕿𝖍𝖊 ',
-            'suffix': ' 𝕭𝖔𝖔𝖐',
-            'format': lambda x: ''.join(chr(ord(c) + 119795) if 'A' <= c <= 'Z' else chr(ord(c) + 119839) if 'a' <= c <= 'z' else c for c in x)
-        },
-        'double': {
-            'prefix': '『',
-            'suffix': '』',
-            'format': lambda x: ''.join(chr(ord(c) + 65248) if '0' <= c <= '9' or 'A' <= c <= 'Z' or 'a' <= c <= 'z' else c for c in x)
-        },
-        'star': {
-            'prefix': '⭐ ',
-            'suffix': ' ⭐',
-            'format': lambda x: x.upper()
-        },
-        'wavy': {
-            'prefix': '〰️『',
-            'suffix': '』〰️',
-            'format': lambda x: x
-        },
-        'box': {
-            'prefix': '┏━━━━━┓\n┃ ',
-            'suffix': ' ┃\n┗━━━━━┛',
-            'format': lambda x: x.center(15)
-        },
-        'arrow': {
-            'prefix': '➡️ ',
-            'suffix': ' ⬅️',
-            'format': lambda x: x
-        }
-    }
-    
-    @classmethod
-    def get_style_for_topic(cls, topic: str) -> str:
-        """اختيار نمط زخرفة مناسب حسب موضوع الكتاب"""
-        topic_lower = topic.lower()
-        
-        if any(word in topic_lower for word in ['ذكاء', 'تقنية', 'ai', 'technology', 'علم']):
-            return random.choice(['bold', 'gothic', 'double'])
-        elif any(word in topic_lower for word in ['حب', 'رومانسي', 'love', 'romance']):
-            return random.choice(['fancy', 'italic', 'star'])
-        elif any(word in topic_lower for word in ['عمل', 'نجاح', 'business', 'success']):
-            return random.choice(['bold', 'box', 'arrow'])
-        elif any(word in topic_lower for word in ['طفل', 'أطفال', 'kids', 'children']):
-            return random.choice(['star', 'wavy', 'fancy'])
-        else:
-            return random.choice(list(cls.STYLES.keys()))
-    
-    @classmethod
-    def decorate_title(cls, title: str, style_name: str = None) -> str:
-        """تزيين العنوان حسب النمط المختار"""
-        if not style_name:
-            style_name = cls.get_style_for_topic(title)
-        
-        style = cls.STYLES.get(style_name, cls.STYLES['default'])
-        
-        # تطبيق التنسيق على النص الإنجليزي فقط
-        words = title.split()
-        decorated_words = []
-        
-        for word in words:
-            if word.isascii() and word.isalpha():
-                # كلمة إنجليزية - نطبق عليها الزخرفة
-                decorated_words.append(style['format'](word))
-            else:
-                # كلمة عربية - تبقى كما هي
-                decorated_words.append(word)
-        
-        decorated_text = ' '.join(decorated_words)
-        return f"{style['prefix']}{decorated_text}{style['suffix']}"
+# إنشاء المجلدات
+for dir_path in [DATA_DIR, BOOKS_DIR, TEMP_DIR, CACHE_DIR]:
+    os.makedirs(dir_path, exist_ok=True)
 
 # ==================== نماذج البيانات ====================
 
@@ -145,118 +65,363 @@ class UserRole(str, Enum):
     FREE_USER = "free_user"
     REGULAR = "regular"
 
+@dataclass
 class UserData:
-    def __init__(self, user_id: int, username: str = "", first_name: str = ""):
+    user_id: int
+    username: str = ""
+    first_name: str = ""
+    role: UserRole = UserRole.REGULAR
+    balance: int = 0
+    is_blocked: bool = False
+    total_books: int = 0
+    total_pages: int = 0
+    created_at: str = ""
+    
+    def to_dict(self):
+        data = asdict(self)
+        data['role'] = self.role.value
+        return data
+    
+    @classmethod
+    def from_dict(cls, data):
+        user = cls(
+            user_id=data['user_id'],
+            username=data.get('username', ''),
+            first_name=data.get('first_name', ''),
+            role=UserRole(data.get('role', 'regular')),
+            balance=data.get('balance', 0),
+            is_blocked=data.get('is_blocked', False),
+            total_books=data.get('total_books', 0),
+            total_pages=data.get('total_pages', 0),
+            created_at=data.get('created_at', datetime.now().isoformat())
+        )
+        return user
+
+@dataclass
+class SessionData:
+    user_id: int
+    messages: List[Dict]
+    topic: str
+    created_at: float
+    last_activity: float
+    temp_files: List[str]
+    
+    def __init__(self, user_id: int):
         self.user_id = user_id
-        self.username = username
-        self.first_name = first_name
-        self.role = UserRole.REGULAR
-        self.balance = 0
-        self.is_blocked = False
-        self.created_at = datetime.now().isoformat()
-        self.total_books = 0  # عدد الكتب المنشأة
+        self.messages = []
+        self.topic = ""
+        self.created_at = time.time()
+        self.last_activity = time.time()
+        self.temp_files = []
+
+@dataclass
+class CacheData:
+    key: str
+    content: str
+    created_at: float
+    expires_at: float
 
 # ==================== إدارة التخزين ====================
 
-def load_users() -> Dict[int, UserData]:
-    if os.path.exists(USERS_FILE):
-        try:
-            with open(USERS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                users = {}
-                for user_id, user_data in data.items():
-                    user = UserData(int(user_id))
-                    user.username = user_data.get('username', '')
-                    user.first_name = user_data.get('first_name', '')
-                    user.role = UserRole(user_data.get('role', 'regular'))
-                    user.balance = user_data.get('balance', 0)
-                    user.is_blocked = user_data.get('is_blocked', False)
-                    user.total_books = user_data.get('total_books', 0)
-                    user.created_at = user_data.get('created_at', datetime.now().isoformat())
-                    users[int(user_id)] = user
-                return users
-        except Exception as e:
-            logger.error(f"خطأ في تحميل المستخدمين: {e}")
-    return {}
-
-def save_users(users: Dict[int, UserData]):
-    data = {}
-    for user_id, user in users.items():
-        data[str(user_id)] = {
-            'username': user.username,
-            'first_name': user.first_name,
-            'role': user.role.value,
-            'balance': user.balance,
-            'is_blocked': user.is_blocked,
-            'total_books': user.total_books,
-            'created_at': user.created_at
-        }
+class StorageManager:
+    def __init__(self):
+        self.users = self._load_users()
+        self.sessions: Dict[int, SessionData] = {}
+        self.cache: Dict[str, CacheData] = {}
+        self._cleanup_old_files()
     
-    with open(USERS_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    def _load_users(self) -> Dict[int, UserData]:
+        users = {}
+        if os.path.exists(USERS_FILE):
+            try:
+                with open(USERS_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    for user_id, user_data in data.items():
+                        users[int(user_id)] = UserData.from_dict(user_data)
+            except Exception as e:
+                logger.error(f"خطأ في تحميل المستخدمين: {e}")
+        return users
+    
+    def save_users(self):
+        data = {}
+        for user_id, user in self.users.items():
+            data[str(user_id)] = user.to_dict()
+        
+        with open(USERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    
+    def get_user(self, user_id: int) -> Optional[UserData]:
+        return self.users.get(user_id)
+    
+    def create_user(self, user_id: int, username: str = "", first_name: str = "") -> UserData:
+        user = UserData(
+            user_id=user_id,
+            username=username,
+            first_name=first_name,
+            created_at=datetime.now().isoformat()
+        )
+        self.users[user_id] = user
+        self.save_users()
+        return user
+    
+    def create_session(self, user_id: int) -> SessionData:
+        self.sessions[user_id] = SessionData(user_id)
+        return self.sessions[user_id]
+    
+    def get_session(self, user_id: int) -> Optional[SessionData]:
+        session = self.sessions.get(user_id)
+        if session:
+            session.last_activity = time.time()
+        return session
+    
+    def delete_session(self, user_id: int):
+        if user_id in self.sessions:
+            # حذف الملفات المؤقتة
+            for temp_file in self.sessions[user_id].temp_files:
+                try:
+                    if os.path.exists(temp_file):
+                        os.remove(temp_file)
+                except:
+                    pass
+            del self.sessions[user_id]
+    
+    def add_temp_file(self, user_id: int, filepath: str):
+        if user_id in self.sessions:
+            self.sessions[user_id].temp_files.append(filepath)
+    
+    def get_cache(self, key: str) -> Optional[str]:
+        cache = self.cache.get(key)
+        if cache and time.time() < cache.expires_at:
+            return cache.content
+        return None
+    
+    def set_cache(self, key: str, content: str, ttl: int = 3600):
+        self.cache[key] = CacheData(
+            key=key,
+            content=content,
+            created_at=time.time(),
+            expires_at=time.time() + ttl
+        )
+    
+    def _cleanup_old_files(self):
+        """تنظيف الملفات القديمة"""
+        try:
+            # تنظيف الملفات المؤقتة الأقدم من ساعة
+            now = time.time()
+            for filename in os.listdir(TEMP_DIR):
+                filepath = os.path.join(TEMP_DIR, filename)
+                if os.path.getctime(filepath) < now - 3600:
+                    os.remove(filepath)
+            
+            # تنظيف الكاش الأقدم من 24 ساعة
+            for filename in os.listdir(CACHE_DIR):
+                filepath = os.path.join(CACHE_DIR, filename)
+                if os.path.getctime(filepath) < now - 86400:
+                    os.remove(filepath)
+        except:
+            pass
+
+# ==================== خدمات PDF ====================
+
+class PDFService:
+    def __init__(self):
+        self.font_path = None
+    
+    def prepare_arabic_text(self, text: str) -> str:
+        """تجهيز النص العربي للعرض في PDF"""
+        try:
+            # إعادة تشكيل الحروف العربية
+            reshaped_text = arabic_reshaper.reshape(text)
+            # ضبط اتجاه النص
+            bidi_text = get_display(reshaped_text)
+            return bidi_text
+        except:
+            return text
+    
+    def create_pdf(self, content: str, title: str, author: str = "بوت الكتب الذكي") -> str:
+        """إنشاء ملف PDF من النص"""
+        
+        class ArabicPDF(FPDF):
+            def __init__(self):
+                super().__init__()
+                self.add_font('Arial', '', 'arial.ttf', uni=True)
+            
+            def header(self):
+                self.set_font('Arial', 'B', 16)
+                self.cell(0, 10, self.title, 0, 1, 'C')
+                self.ln(10)
+            
+            def footer(self):
+                self.set_y(-15)
+                self.set_font('Arial', 'I', 8)
+                self.cell(0, 10, f'الصفحة {self.page_no()}', 0, 0, 'C')
+        
+        # إنشاء اسم ملف فريد
+        filename = f"book_{int(time.time())}_{hashlib.md5(title.encode()).hexdigest()[:8]}.pdf"
+        filepath = os.path.join(BOOKS_DIR, filename)
+        
+        pdf = ArabicPDF()
+        pdf.set_title(title)
+        pdf.set_author(author)
+        
+        # إضافة صفحة الغلاف
+        pdf.add_page()
+        pdf.set_font('Arial', 'B', 20)
+        pdf.cell(0, 40, '', 0, 1)
+        pdf.cell(0, 20, self.prepare_arabic_text(title), 0, 1, 'C')
+        pdf.set_font('Arial', 'I', 12)
+        pdf.cell(0, 10, f"تأليف: {author}", 0, 1, 'C')
+        pdf.cell(0, 10, datetime.now().strftime("%Y-%m-%d"), 0, 1, 'C')
+        
+        # تقسيم المحتوى إلى صفحات
+        paragraphs = content.split('\n\n')
+        current_page = 1
+        current_chapter = ""
+        
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+            
+            # التحقق من بداية فصل جديد
+            if para.startswith('#'):
+                pdf.add_page()
+                current_chapter = para.replace('#', '').strip()
+                pdf.set_font('Arial', 'B', 14)
+                pdf.cell(0, 10, self.prepare_arabic_text(current_chapter), 0, 1, 'R')
+                pdf.ln(5)
+                continue
+            
+            # كتابة النص العادي
+            pdf.set_font('Arial', '', 12)
+            
+            # تقسيم النص الطويل إلى أسطر
+            lines = para.split('\n')
+            for line in lines:
+                if line.strip():
+                    # تجهيز النص العربي
+                    text = self.prepare_arabic_text(line.strip())
+                    pdf.multi_cell(0, 8, text, 0, 'R')
+            
+            pdf.ln(5)
+        
+        # حفظ الملف
+        pdf.output(filepath)
+        return filepath
 
 # ==================== خدمات الذكاء الاصطناعي ====================
 
 class AIService:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, storage: StorageManager):
         self.client = Groq(api_key=api_key)
+        self.storage = storage
     
-    async def generate_book_with_markdown(self, discussion: str, topic: str) -> str:
-        """توليد الكتاب مع تنسيق Markdown"""
+    async def generate_book_chunk(self, prompt: str, chunk_number: int, total_chunks: int) -> str:
+        """توليد جزء من الكتاب مع نظام التبريد"""
         
-        prompt = f"""أنت كاتب محترف. بناءً على المناقشة التالية حول "{topic}"، قم بإنشاء كتاب كامل ومنظم مع استخدام تنسيق Markdown:
-
-{discussion}
-
-**مطلوب استخدام تنسيق Markdown كالتالي:**
-
-# العنوان الرئيسي للكتاب (H1)
-## عناوين الفصول (H2)
-### عناوين الأقسام الفرعية (H3)
-
-**للتنسيق:**
-- **نص عريض** للنقاط المهمة
-- *نص مائل* للمصطلحات الأجنبية
-- `كود` للأمثلة التقنية
-- قوائم نقطية للنقاط الرئيسية
-- قوائم رقمية للخطوات
-- > اقتباسات للأقوال المأثورة
-- --- فواصل بين الأقسام
-
-**هيكل الكتاب المطلوب:**
-1. # عنوان جذاب للكتاب
-2. ## المقدمة
-3. ## الفصل الأول: [العنوان]
-   - ### [عنوان القسم]
-   - **نقاط مهمة** مع تنسيق
-4. ## الفصل الثاني: [العنوان]
-   - ### [عنوان القسم]
-   - أمثلة عملية مع تنسيق
-5. ## الخاتمة
-6. ---
-7. ## كلمات مفتاحية
-
-الرجاء إنشاء كتاب غني بالمحتوى مع تنسيق Markdown جميل."""
+        system_prompt = f"""أنت كاتب محترف. هذا الجزء {chunk_number} من {total_chunks} من الكتاب.
+اكتب محتوى غني ومفصل لهذا الجزء."""
         
-        try:
-            completion = self.client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.8,
-                max_tokens=4000,
-                top_p=1,
-                stream=False
-            )
-            
-            return completion.choices[0].message.content
-            
-        except Exception as e:
-            logger.error(f"خطأ في توليد الكتاب: {e}")
-            return f"حدث خطأ في توليد الكتاب: {str(e)}"
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                completion = self.client.chat.completions.create(
+                    model="openai/gpt-oss-120b",
+                    messages=messages,
+                    temperature=0.8,
+                    max_tokens=2000,
+                    top_p=1,
+                    stream=False
+                )
+                
+                return completion.choices[0].message.content
+                
+            except Exception as e:
+                logger.error(f"محاولة {attempt + 1} فشلت: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(COOLDOWN_BETWEEN_CHUNKS * (attempt + 1))
+                else:
+                    raise e
+    
+    async def generate_full_book(self, discussion: str, topic: str, user_id: int) -> str:
+        """توليد الكتاب كاملاً مع التقسيم والتبريد"""
+        
+        # التحقق من وجود الكتاب في الكاش
+        cache_key = hashlib.md5(f"{user_id}_{topic}".encode()).hexdigest()
+        cached = self.storage.get_cache(cache_key)
+        if cached:
+            return cached
+        
+        # تقسيم الكتاب إلى أجزاء
+        chunks = []
+        
+        # الجزء الأول: الهيكل العام
+        structure_prompt = f"""بناءً على المناقشة التالية حول "{topic}"،
+أعطني هيكل الكتاب مع عناوين الفصول الرئيسية:
+
+{discussion[:1000]}
+
+المطلوب:
+1. عنوان الكتاب
+2. قائمة الفصول (3-5 فصول)
+3. النقاط الرئيسية في كل فصل"""
+        
+        structure = await self.generate_book_chunk(structure_prompt, 1, 4)
+        chunks.append(structure)
+        
+        await asyncio.sleep(COOLDOWN_BETWEEN_CHUNKS)
+        
+        # الجزء الثاني: المقدمة والفصل الأول
+        intro_prompt = f"""اكتب المقدمة والفصل الأول من الكتاب "{topic}".
+الهيكل المقترح:
+{structure[:500]}
+
+المقدمة: لماذا هذا الكتاب مهم؟
+الفصل الأول: ابدأ بأهم المفاهيم مع أمثلة واقعية"""
+        
+        chunk2 = await self.generate_book_chunk(intro_prompt, 2, 4)
+        chunks.append(chunk2)
+        
+        await asyncio.sleep(COOLDOWN_BETWEEN_CHUNKS)
+        
+        # الجزء الثالث: الفصول الوسطى
+        middle_prompt = f"""اكمل الفصول الوسطى من الكتاب "{topic}".
+تابع من حيث انتهينا:
+{chunk2[-500:]}
+
+أضف أمثلة عملية وحالات دراسية"""
+        
+        chunk3 = await self.generate_book_chunk(middle_prompt, 3, 4)
+        chunks.append(chunk3)
+        
+        await aspońcio.sleep(COOLDOWN_BETWEEN_CHUNKS)
+        
+        # الجزء الرابع: الخاتمة والتوصيات
+        conclusion_prompt = f"""اكتب الخاتمة والتوصيات النهائية للكتاب "{topic}".
+الخاتمة: تلخيص لأهم النقاط
+التوصيات: خطوات عملية للقارئ
+المراجع: مصادر مقترحة"""
+        
+        chunk4 = await self.generate_book_chunk(conclusion_prompt, 4, 4)
+        chunks.append(chunk4)
+        
+        # دمج الأجزاء
+        full_book = "\n\n---\n\n".join(chunks)
+        
+        # حفظ في الكاش
+        self.storage.set_cache(cache_key, full_book, ttl=3600)  # ساعة واحدة
+        
+        return full_book
     
     async def chat_response(self, message: str, history: list) -> str:
+        """الرد على المحادثة"""
+        
         messages = [
-            {"role": "system", "content": "أنت مساعد متخصص في تطوير أفكار الكتب. ناقش المستخدم بلطف وساعد في تطوير فكرته."},
+            {"role": "system", "content": "أنت مساعد متخصص في تطوير أفكار الكتب."},
             *history[-5:],
             {"role": "user", "content": message}
         ]
@@ -282,108 +447,90 @@ class AIService:
 class EBookBot:
     def __init__(self, token: str, groq_key: str):
         self.token = token
-        self.ai_service = AIService(groq_key)
-        self.users = load_users()
-        self.sessions = {}  # {user_id: {"messages": [], "topic": ""}}
+        self.storage = StorageManager()
+        self.ai_service = AIService(groq_key, self.storage)
+        self.pdf_service = PDFService()
         
         # إضافة المشرف الرئيسي
-        if ADMIN_ID not in self.users:
-            admin = UserData(ADMIN_ID, "admin", "Admin")
-            admin.role = UserRole.ADMIN
-            self.users[ADMIN_ID] = admin
-            save_users(self.users)
-    
-    def extract_topic(self, messages: List[Dict]) -> str:
-        """استخراج موضوع الكتاب من أول رسالة للمستخدم"""
-        for msg in messages:
-            if msg['role'] == 'user':
-                return msg['content'][:50]  # أول 50 حرف كموضوع
-        return "كتاب جديد"
+        if ADMIN_ID not in self.storage.users:
+            admin = UserData(
+                user_id=ADMIN_ID,
+                username="admin",
+                first_name="Admin",
+                role=UserRole.ADMIN
+            )
+            self.storage.users[ADMIN_ID] = admin
+            self.storage.save_users()
     
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         
-        if user.id not in self.users:
-            self.users[user.id] = UserData(
-                user.id, 
-                user.username or "", 
-                user.first_name or ""
-            )
-            save_users(self.users)
+        if user.id not in self.storage.users:
+            self.storage.create_user(user.id, user.username or "", user.first_name or "")
         
         welcome = f"""
-🎉 **مرحباً بك في بوت صناعة الكتب الإلكترونية** {user.first_name}!
+مرحباً بك في بوت صناعة الكتب الإلكترونية {user.first_name}
 
-📚 **الميزات المتطورة:**
-• ✨ **تنسيق Markdown** للكتب (عناوين، تنسيق، ألوان)
-• 🎨 **زخرفة العناوين الإنجليزية** حسب موضوع الكتاب
-• 💬 مناقشة تفاعلية لفكرة كتابك
-• 🤖 ذكاء اصطناعي متطور لكتابة محتوى احترافي
+الميزات:
+• كتب بتنسيق PDF احترافي
+• نظام تبريد للمحرك للكتب الكبيرة
+• تخزين مؤقت للجلسات
+• دعم كامل للغة العربية في PDF
 
-💰 **السعر:** `{BOOK_PRICE} نجمة` للكتاب
-⭐ المستخدمون المميزون: إنشاء مجاني
+السعر: {BOOK_PRICE} نجمة للكتاب
+المستخدمون المميزون: إنشاء مجاني
 
-**الأوامر المتاحة:**
+الأوامر:
 /start - ترحيب
-/help - مساعدة مفصلة
-/newbook - ✨ **بدء كتاب جديد** ✨
+/help - مساعدة
+/newbook - بدء كتاب جديد
 /build - إنشاء الكتاب
 /balance - رصيدي
 /cancel - إلغاء
 """
-        await update.message.reply_text(welcome, parse_mode='Markdown')
+        await update.message.reply_text(welcome)
     
     async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         help_text = f"""
-📚 **دليل استخدام البوت المتقدم:**
+طريقة الاستخدام:
 
-**✨ الميزات الجديدة:**
-• **تنسيق Markdown:** الكتب تأتي بعناوين وتنسيق احترافي
-• **زخرفة إنجليزية:** العناوين الإنجليزية تُزخرف حسب الموضوع
-• **معاينة فورية:** يمكنك رؤية التنسيق مباشرة
+1 اكتب /newbook لبدء كتاب جديد
+2 ناقش فكرة كتابك مع البوت
+3 اكتب /build لإنشاء الكتاب
+4 استلم الكتاب كملف PDF
 
-**💰 نظام الدفع:**
-• سعر الكتاب: `{BOOK_PRICE} نجمة`
-• المستخدمون المميزون: إنشاء مجاني ⭐
-• المشرفون: صلاحية كاملة 👑
+نظام التبريد:
+• الكتب الكبيرة تقسم إلى أجزاء
+• كل جزء ينشأ بفاصل زمني
+• تخزين مؤقت للجلسة
 
-**📝 طريقة الاستخدام:**
-1️⃣ اكتب `/newbook` لبدء كتاب جديد
-2️⃣ ناقش فكرة كتابك بالتفصيل
-3️⃣ اكتب `/build` لإنشاء الكتاب
-4️⃣ استلم الكتاب بتنسيق Markdown جميل
+السعر: {BOOK_PRICE} نجمة
 
-**🎨 أمثلة على الزخرفة:**
-• مواضيع تقنية: `𝐁𝐨𝐨𝐤: 𝐀𝐈 𝐆𝐮𝐢𝐝𝐞`
-• مواضيع أدبية: `✨『Love Story』✨`
-• مواضيع علمية: `𝕿𝖍𝖊 𝕾𝖈𝖎𝖊𝖓𝖈𝖊 𝕭𝖔𝖔𝖐`
-
-**👑 أوامر المشرف:**
+أوامر المشرف:
 /add_free id - إضافة مستخدم مميز
 /remove_free id - إزالة مستخدم مميز
 /users - قائمة المستخدمين
 """
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+        await update.message.reply_text(help_text)
     
     async def newbook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        if user_id in self.users and self.users[user_id].is_blocked:
-            await update.message.reply_text("❌ **عذراً، حسابك محظور.**", parse_mode='Markdown')
+        user = self.storage.get_user(user_id)
+        if user and user.is_blocked:
+            await update.message.reply_text("حسابك محظور.")
             return ConversationHandler.END
         
-        # بدء جلسة جديدة
-        self.sessions[user_id] = {"messages": [], "topic": ""}
+        # إنشاء جلسة جديدة
+        self.storage.create_session(user_id)
         
         await update.message.reply_text(
-            "📝 **✨ بدأنا رحلة كتاب جديد! ✨**\n\n"
+            "بدأنا!\n\n"
             "أخبرني عن فكرة كتابك:\n"
-            "• **الموضوع الرئيسي**\n"
-            "• **الجمهور المستهدف**\n"
-            "• **الأفكار الرئيسية**\n\n"
-            "_عندما تجهز، اكتب /build_\n\n"
-            "💡 **نصيحة:** كلما كانت المناقشة أعمق، كان الكتاب أفضل!",
-            parse_mode='Markdown'
+            "- الموضوع الرئيسي\n"
+            "- الجمهور المستهدف\n"
+            "- الأفكار الرئيسية\n\n"
+            "عندما تجهز، اكتب /build"
         )
         
         return DISCUSSION
@@ -392,27 +539,28 @@ class EBookBot:
         user_id = update.effective_user.id
         message = update.message.text
         
-        if user_id not in self.sessions:
-            await update.message.reply_text("❌ **ابدأ بـ /newbook أولاً**", parse_mode='Markdown')
+        session = self.storage.get_session(user_id)
+        if not session:
+            await update.message.reply_text("ابدأ بـ /newbook أولاً")
             return ConversationHandler.END
         
         # حفظ الموضوع من أول رسالة
-        if not self.sessions[user_id]["topic"] and len(self.sessions[user_id]["messages"]) == 0:
-            self.sessions[user_id]["topic"] = message[:50]
+        if not session.topic and len(session.messages) == 0:
+            session.topic = message[:50]
         
         # حفظ رسالة المستخدم
-        self.sessions[user_id]["messages"].append({"role": "user", "content": message})
+        session.messages.append({"role": "user", "content": message})
         
         # إرسال رد
         await update.message.chat.send_action(action="typing")
         
         response = await self.ai_service.chat_response(
             message, 
-            self.sessions[user_id]["messages"][:-1]
+            session.messages[:-1]
         )
         
         # حفظ الرد
-        self.sessions[user_id]["messages"].append({"role": "assistant", "content": response})
+        session.messages.append({"role": "assistant", "content": response})
         
         await update.message.reply_text(response)
         
@@ -421,12 +569,13 @@ class EBookBot:
     async def build(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        if user_id not in self.sessions or not self.sessions[user_id]["messages"]:
-            await update.message.reply_text("❌ **لا توجد مناقشة. ابدأ بـ /newbook**", parse_mode='Markdown')
+        session = self.storage.get_session(user_id)
+        if not session or not session.messages:
+            await update.message.reply_text("لا توجد مناقشة. ابدأ بـ /newbook")
             return
         
-        user_data = self.users.get(user_id)
-        topic = self.sessions[user_id]["topic"] or "كتاب جديد"
+        user_data = self.storage.get_user(user_id)
+        topic = session.topic or "كتاب جديد"
         
         # التحقق من الصلاحية
         can_proceed = False
@@ -435,136 +584,112 @@ class EBookBot:
         elif user_data.balance >= BOOK_PRICE:
             can_proceed = True
             user_data.balance -= BOOK_PRICE
-            save_users(self.users)
+            self.storage.save_users()
         else:
             await update.message.reply_text(
-                f"❌ **رصيدك غير كافٍ.**\n\n"
-                f"تحتاج `{BOOK_PRICE} نجمة` لإنشاء كتاب.\n"
-                f"رصيدك الحالي: `{user_data.balance} نجمة`\n\n"
-                "تواصل مع المشرف لشحن الرصيد.",
-                parse_mode='Markdown'
+                f"رصيدك غير كافٍ. تحتاج {BOOK_PRICE} نجمة.\n"
+                f"رصيدك الحالي: {user_data.balance} نجمة"
             )
             return
         
         # جمع المناقشة
         discussion = "\n".join([
-            f"**{msg['role']}**: {msg['content']}"
-            for msg in self.sessions[user_id]["messages"]
+            f"{msg['role']}: {msg['content']}"
+            for msg in session.messages
         ])
         
         # إعلام المستخدم
         status = await update.message.reply_text(
-            "🔄 **✨ جاري إنشاء كتابك بتقنية Markdown... ✨**\n\n"
-            "• تحليل المناقشة\n"
-            "• تطبيق تنسيق Markdown\n"
-            "• زخرفة العناوين الإنجليزية\n"
-            "• تجهيز الملف\n\n"
-            "_قد تستغرق العملية دقيقة._",
-            parse_mode='Markdown'
+            "جاري إنشاء كتابك...\n"
+            "قد تستغرق العملية دقيقتين للكتب الكبيرة.\n"
+            "نظام التبريد يعمل لتجنب الضغط على المحرك."
         )
         
+        temp_file = None
+        
         try:
-            # توليد الكتاب مع Markdown
-            book_content = await self.ai_service.generate_book_with_markdown(discussion, topic)
+            # توليد الكتاب مع نظام التبريد
+            book_content = await self.ai_service.generate_full_book(
+                discussion, 
+                topic,
+                user_id
+            )
             
-            # زخرفة العنوان الرئيسي إذا كان إنجليزياً
-            lines = book_content.split('\n')
-            if lines and lines[0].startswith('# '):
-                title = lines[0][2:].strip()
-                # التحقق إذا كان العنوان يحتوي على إنجليزية
-                if any(c.isascii() and c.isalpha() for c in title):
-                    style = DecorationStyle.get_style_for_topic(topic)
-                    decorated_title = DecorationStyle.decorate_title(title, style)
-                    lines[0] = f'# {decorated_title}'
-                    book_content = '\n'.join(lines)
+            # إنشاء PDF
+            pdf_file = self.pdf_service.create_pdf(
+                book_content,
+                topic,
+                user_data.first_name or "مستخدم"
+            )
             
-            # إضافة تذييل مع تنسيق
-            book_content += f"\n\n---\n"
-            book_content += f"**📚 تم إنشاء هذا الكتاب باستخدام بوت الكتب الذكي**\n"
-            book_content += f"*تاريخ الإنشاء: {datetime.now().strftime('%Y-%m-%d %H:%M')}*\n"
-            book_content += f"*الموضوع: {topic}*\n"
+            # حفظ المسار المؤقت
+            self.storage.add_temp_file(user_id, pdf_file)
             
-            # حفظ الكتاب
-            filename = f"book_{user_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
-            filepath = os.path.join(BOOKS_DIR, filename)
-            
-            with open(filepath, 'w', encoding='utf-8') as f:
-                f.write(book_content)
-            
-            # تحديث عدد الكتب
+            # تحديث إحصائيات المستخدم
             user_data.total_books += 1
-            save_users(self.users)
+            # تقدير عدد الصفحات (تقريباً)
+            pages_estimate = len(book_content) // 1500 + 10
+            user_data.total_pages += pages_estimate
+            self.storage.save_users()
             
             # إرسال الكتاب
             await status.delete()
             
-            with open(filepath, 'rb') as f:
+            with open(pdf_file, 'rb') as f:
                 await update.message.reply_document(
                     document=f,
-                    filename=filename.replace('.md', '.txt'),  # تلغرام يقبل txt
-                    caption=f"✅ **✨ تم إنشاء كتابك بنجاح! ✨**\n\n"
-                           f"**الموضوع:** {topic}\n"
-                           f"**التنسيق:** Markdown (عناوين، تنسيق)\n"
-                           f"**عدد الكتب المنشأة:** {user_data.total_books}\n\n"
-                           f"_ملف الكتاب بتنسيق Markdown - يمكنك فتحه بأي محرر نصوص_",
-                    parse_mode='Markdown'
+                    filename=f"كتاب_{topic[:30]}.pdf",
+                    caption=f"تم إنشاء كتابك بنجاح!\n"
+                           f"الموضوع: {topic}\n"
+                           f"عدد الصفحات التقديري: {pages_estimate}\n"
+                           f"إجمالي كتبك: {user_data.total_books}"
                 )
             
-            # إرسال معاينة سريعة
-            preview = book_content[:500] + "..."
-            await update.message.reply_text(
-                f"📖 **معاينة سريعة:**\n\n{preview}",
-                parse_mode='Markdown'
-            )
-            
-            # تنظيف
-            os.remove(filepath)
-            del self.sessions[user_id]
+            # تنظيف الجلسة
+            self.storage.delete_session(user_id)
             
         except Exception as e:
             logger.error(f"خطأ: {e}")
             await status.edit_text(
-                "❌ **حدث خطأ أثناء إنشاء الكتاب.**\n"
-                "الرجاء المحاولة مرة أخرى لاحقاً.",
-                parse_mode='Markdown'
+                "حدث خطأ أثناء إنشاء الكتاب.\n"
+                "الرجاء المحاولة مرة أخرى لاحقاً."
             )
     
     async def balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        user_data = self.users.get(user_id)
+        user_data = self.storage.get_user(user_id)
         
         if not user_data:
-            await update.message.reply_text("❌ **مستخدم غير مسجل**", parse_mode='Markdown')
+            await update.message.reply_text("مستخدم غير مسجل")
             return
         
         role_names = {
-            UserRole.ADMIN: "👑 **مشرف**",
-            UserRole.FREE_USER: "⭐ **مستخدم مميز** (إنشاء مجاني)",
-            UserRole.REGULAR: "👤 **مستخدم عادي**"
+            UserRole.ADMIN: "مشرف",
+            UserRole.FREE_USER: "مستخدم مميز (مجاني)",
+            UserRole.REGULAR: "مستخدم عادي"
         }
         
         text = f"""
-💰 **معلومات حسابك:**
+معلومات حسابك:
 
-**الرصيد:** `{user_data.balance} نجمة`
-**الدور:** {role_names[user_data.role]}
-**الكتب المنشأة:** `{user_data.total_books} كتاب`
-**سعر الكتاب:** `{BOOK_PRICE} نجمة`
+الرصيد: {user_data.balance} نجمة
+الدور: {role_names[user_data.role]}
+الكتب المنشأة: {user_data.total_books} كتاب
+إجمالي الصفحات: {user_data.total_pages} صفحة
+سعر الكتاب: {BOOK_PRICE} نجمة
 
-{'✨ **لديك صلاحية إنشاء مجاني!**' if user_data.role in [UserRole.ADMIN, UserRole.FREE_USER] else ''}
+{'' if user_data.role in [UserRole.ADMIN, UserRole.FREE_USER] else 'تحتاج لدفع مقابل كل كتاب'}
 """
-        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(text)
     
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
-        if user_id in self.sessions:
-            del self.sessions[user_id]
+        self.storage.delete_session(user_id)
         
         await update.message.reply_text(
-            "✅ **تم إلغاء العملية.**\n"
-            "يمكنك بدء كتاب جديد بـ /newbook",
-            parse_mode='Markdown'
+            "تم الإلغاء.\n"
+            "يمكنك بدء كتاب جديد بـ /newbook"
         )
         return ConversationHandler.END
     
@@ -574,68 +699,53 @@ class EBookBot:
         user_id = update.effective_user.id
         
         if user_id != ADMIN_ID:
-            await update.message.reply_text("❌ **غير مصرح**", parse_mode='Markdown')
+            await update.message.reply_text("غير مصرح")
             return
         
         try:
             target = int(context.args[0])
             
-            if target not in self.users:
-                self.users[target] = UserData(target)
+            if target not in self.storage.users:
+                self.storage.create_user(target)
             
-            self.users[target].role = UserRole.FREE_USER
-            save_users(self.users)
+            self.storage.users[target].role = UserRole.FREE_USER
+            self.storage.save_users()
             
-            await update.message.reply_text(
-                f"✅ **تمت إضافة المستخدم `{target}` كمستخدم مميز** ⭐",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text(f"تمت إضافة {target} كمستخدم مميز")
             
         except (IndexError, ValueError):
-            await update.message.reply_text(
-                "❌ **استخدم:** `/add_free user_id`",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("استخدم: /add_free user_id")
     
     async def remove_free(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
         if user_id != ADMIN_ID:
-            await update.message.reply_text("❌ **غير مصرح**", parse_mode='Markdown')
+            await update.message.reply_text("غير مصرح")
             return
         
         try:
             target = int(context.args[0])
             
-            if target in self.users:
-                self.users[target].role = UserRole.REGULAR
-                save_users(self.users)
-                await update.message.reply_text(
-                    f"✅ **تمت إزالة الصلاحية عن المستخدم `{target}`**",
-                    parse_mode='Markdown'
-                )
+            if target in self.storage.users:
+                self.storage.users[target].role = UserRole.REGULAR
+                self.storage.save_users()
+                await update.message.reply_text(f"تمت إزالة الصلاحية عن {target}")
             else:
-                await update.message.reply_text(
-                    "❌ **مستخدم غير موجود**",
-                    parse_mode='Markdown'
-                )
+                await update.message.reply_text("مستخدم غير موجود")
                 
         except (IndexError, ValueError):
-            await update.message.reply_text(
-                "❌ **استخدم:** `/remove_free user_id`",
-                parse_mode='Markdown'
-            )
+            await update.message.reply_text("استخدم: /remove_free user_id")
     
     async def users_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
         if user_id != ADMIN_ID:
-            await update.message.reply_text("❌ **غير مصرح**", parse_mode='Markdown')
+            await update.message.reply_text("غير مصرح")
             return
         
-        text = "📋 **📊 قائمة المستخدمين:**\n\n"
+        text = "قائمة المستخدمين:\n\n"
         
-        for uid, user in list(self.users.items())[:20]:
+        for uid, user in list(self.storage.users.items())[:20]:
             role_icon = {
                 UserRole.ADMIN: "👑",
                 UserRole.FREE_USER: "⭐",
@@ -644,15 +754,11 @@ class EBookBot:
             
             block = "🔴" if user.is_blocked else "🟢"
             
-            text += f"{block} {role_icon} **`{uid}`**: {user.first_name}\n"
-            text += f"   ├ الرصيد: `{user.balance}` ⭐\n"
-            text += f"   ├ الكتب: `{user.total_books}` 📚\n"
-            text += f"   └ المستخدم: @{user.username or 'لا يوجد'}\n\n"
+            text += f"{block} {role_icon} {uid}: {user.first_name}\n"
+            text += f"   الرصيد: {user.balance} | الكتب: {user.total_books}\n"
+            text += f"   المستخدم: @{user.username or 'لا يوجد'}\n\n"
         
-        if len(self.users) > 20:
-            text += f"_...و {len(self.users) - 20} مستخدم آخر_"
-        
-        await update.message.reply_text(text, parse_mode='Markdown')
+        await update.message.reply_text(text)
     
     def run(self):
         """تشغيل البوت"""
@@ -682,7 +788,15 @@ class EBookBot:
         )
         app.add_handler(conv)
         
-        logger.info("✅ البوت يعمل مع ميزات Markdown والزخرفة...")
+        # تنظيف دوري كل ساعة
+        async def periodic_cleanup():
+            while True:
+                await asyncio.sleep(3600)
+                self.storage._cleanup_old_files()
+        
+        asyncio.create_task(periodic_cleanup())
+        
+        logger.info("البوت يعمل مع نظام PDF والتبريد...")
         app.run_polling()
 
 # ==================== التشغيل ====================
