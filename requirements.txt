@@ -1,2 +1,2 @@
-python3 -m pip install --upgrade pip
-python3 -m pip install python-telegram-bot==20.3 openai
+python-telegram-bot==20.3
+openai
