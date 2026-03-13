@@ -1,5 +1,6 @@
-python-telegram-bot==21.10
-groq==0.18.0
-fpdf2==2.8.2
+python-telegram-bot[job-queue]==20.8
+groq==0.4.2
+fpdf2==2.7.8
 arabic-reshaper==3.0.0
 python-bidi==0.4.2
+sqlite3-api==0.1.1
