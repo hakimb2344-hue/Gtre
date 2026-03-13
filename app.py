@@ -43,9 +43,9 @@ BOOK_PRICE = 25
 DISCUSSION = 1
 
 # إعدادات التبريد
-COOLDOWN_BETWEEN_CHUNKS = 2  # ثواني بين أجزاء الكتاب
-MAX_CHUNK_SIZE = 1500  # حجم الجزء الواحد من الكتاب
-MAX_RETRIES = 3  # عدد محاولات إعادة المحاولة عند الفشل
+COOLDOWN_BETWEEN_CHUNKS = 2
+MAX_CHUNK_SIZE = 1500
+MAX_RETRIES = 3
 
 # مجلدات التخزين
 DATA_DIR = "bot_data"
@@ -54,7 +54,6 @@ BOOKS_DIR = f"{DATA_DIR}/books"
 TEMP_DIR = f"{DATA_DIR}/temp"
 CACHE_DIR = f"{DATA_DIR}/cache"
 
-# إنشاء المجلدات
 for dir_path in [DATA_DIR, BOOKS_DIR, TEMP_DIR, CACHE_DIR]:
     os.makedirs(dir_path, exist_ok=True)
 
@@ -84,7 +83,7 @@ class UserData:
     
     @classmethod
     def from_dict(cls, data):
-        user = cls(
+        return cls(
             user_id=data['user_id'],
             username=data.get('username', ''),
             first_name=data.get('first_name', ''),
@@ -95,7 +94,6 @@ class UserData:
             total_pages=data.get('total_pages', 0),
             created_at=data.get('created_at', datetime.now().isoformat())
         )
-        return user
 
 @dataclass
 class SessionData:
@@ -114,22 +112,13 @@ class SessionData:
         self.last_activity = time.time()
         self.temp_files = []
 
-@dataclass
-class CacheData:
-    key: str
-    content: str
-    created_at: float
-    expires_at: float
-
 # ==================== إدارة التخزين ====================
 
 class StorageManager:
     def __init__(self):
         self.users = self._load_users()
         self.sessions: Dict[int, SessionData] = {}
-        self.cache: Dict[str, CacheData] = {}
-        self._cleanup_old_files()
-    
+        
     def _load_users(self) -> Dict[int, UserData]:
         users = {}
         if os.path.exists(USERS_FILE):
@@ -176,7 +165,6 @@ class StorageManager:
     
     def delete_session(self, user_id: int):
         if user_id in self.sessions:
-            # حذف الملفات المؤقتة
             for temp_file in self.sessions[user_id].temp_files:
                 try:
                     if os.path.exists(temp_file):
@@ -189,50 +177,32 @@ class StorageManager:
         if user_id in self.sessions:
             self.sessions[user_id].temp_files.append(filepath)
     
-    def get_cache(self, key: str) -> Optional[str]:
-        cache = self.cache.get(key)
-        if cache and time.time() < cache.expires_at:
-            return cache.content
-        return None
-    
-    def set_cache(self, key: str, content: str, ttl: int = 3600):
-        self.cache[key] = CacheData(
-            key=key,
-            content=content,
-            created_at=time.time(),
-            expires_at=time.time() + ttl
-        )
-    
-    def _cleanup_old_files(self):
-        """تنظيف الملفات القديمة"""
+    def cleanup_old_files(self):
+        """تنظيف الملفات القديمة (تُستدعى يدوياً)"""
         try:
-            # تنظيف الملفات المؤقتة الأقدم من ساعة
             now = time.time()
             for filename in os.listdir(TEMP_DIR):
                 filepath = os.path.join(TEMP_DIR, filename)
                 if os.path.getctime(filepath) < now - 3600:
                     os.remove(filepath)
             
-            # تنظيف الكاش الأقدم من 24 ساعة
             for filename in os.listdir(CACHE_DIR):
                 filepath = os.path.join(CACHE_DIR, filename)
                 if os.path.getctime(filepath) < now - 86400:
                     os.remove(filepath)
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"خطأ في التنظيف: {e}")
 
 # ==================== خدمات PDF ====================
 
 class PDFService:
     def __init__(self):
-        self.font_path = None
+        pass
     
     def prepare_arabic_text(self, text: str) -> str:
         """تجهيز النص العربي للعرض في PDF"""
         try:
-            # إعادة تشكيل الحروف العربية
             reshaped_text = arabic_reshaper.reshape(text)
-            # ضبط اتجاه النص
             bidi_text = get_display(reshaped_text)
             return bidi_text
         except:
@@ -242,10 +212,6 @@ class PDFService:
         """إنشاء ملف PDF من النص"""
         
         class ArabicPDF(FPDF):
-            def __init__(self):
-                super().__init__()
-                self.add_font('Arial', '', 'arial.ttf', uni=True)
-            
             def header(self):
                 self.set_font('Arial', 'B', 16)
                 self.cell(0, 10, self.title, 0, 1, 'C')
@@ -256,7 +222,6 @@ class PDFService:
                 self.set_font('Arial', 'I', 8)
                 self.cell(0, 10, f'الصفحة {self.page_no()}', 0, 0, 'C')
         
-        # إنشاء اسم ملف فريد
         filename = f"book_{int(time.time())}_{hashlib.md5(title.encode()).hexdigest()[:8]}.pdf"
         filepath = os.path.join(BOOKS_DIR, filename)
         
@@ -264,7 +229,7 @@ class PDFService:
         pdf.set_title(title)
         pdf.set_author(author)
         
-        # إضافة صفحة الغلاف
+        # الغلاف
         pdf.add_page()
         pdf.set_font('Arial', 'B', 20)
         pdf.cell(0, 40, '', 0, 1)
@@ -273,54 +238,43 @@ class PDFService:
         pdf.cell(0, 10, f"تأليف: {author}", 0, 1, 'C')
         pdf.cell(0, 10, datetime.now().strftime("%Y-%m-%d"), 0, 1, 'C')
         
-        # تقسيم المحتوى إلى صفحات
+        # المحتوى
         paragraphs = content.split('\n\n')
-        current_page = 1
-        current_chapter = ""
         
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
             
-            # التحقق من بداية فصل جديد
             if para.startswith('#'):
                 pdf.add_page()
-                current_chapter = para.replace('#', '').strip()
+                chapter = para.replace('#', '').strip()
                 pdf.set_font('Arial', 'B', 14)
-                pdf.cell(0, 10, self.prepare_arabic_text(current_chapter), 0, 1, 'R')
+                pdf.cell(0, 10, self.prepare_arabic_text(chapter), 0, 1, 'R')
                 pdf.ln(5)
                 continue
             
-            # كتابة النص العادي
             pdf.set_font('Arial', '', 12)
-            
-            # تقسيم النص الطويل إلى أسطر
             lines = para.split('\n')
             for line in lines:
                 if line.strip():
-                    # تجهيز النص العربي
                     text = self.prepare_arabic_text(line.strip())
                     pdf.multi_cell(0, 8, text, 0, 'R')
-            
             pdf.ln(5)
         
-        # حفظ الملف
         pdf.output(filepath)
         return filepath
 
 # ==================== خدمات الذكاء الاصطناعي ====================
 
 class AIService:
-    def __init__(self, api_key: str, storage: StorageManager):
+    def __init__(self, api_key: str):
         self.client = Groq(api_key=api_key)
-        self.storage = storage
     
     async def generate_book_chunk(self, prompt: str, chunk_number: int, total_chunks: int) -> str:
-        """توليد جزء من الكتاب مع نظام التبريد"""
+        """توليد جزء من الكتاب"""
         
-        system_prompt = f"""أنت كاتب محترف. هذا الجزء {chunk_number} من {total_chunks} من الكتاب.
-اكتب محتوى غني ومفصل لهذا الجزء."""
+        system_prompt = f"أنت كاتب محترف. هذا الجزء {chunk_number} من {total_chunks} من الكتاب."
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -337,7 +291,6 @@ class AIService:
                     top_p=1,
                     stream=False
                 )
-                
                 return completion.choices[0].message.content
                 
             except Exception as e:
@@ -347,75 +300,39 @@ class AIService:
                 else:
                     raise e
     
-    async def generate_full_book(self, discussion: str, topic: str, user_id: int) -> str:
-        """توليد الكتاب كاملاً مع التقسيم والتبريد"""
+    async def generate_full_book(self, discussion: str, topic: str) -> str:
+        """توليد الكتاب كاملاً"""
         
-        # التحقق من وجود الكتاب في الكاش
-        cache_key = hashlib.md5(f"{user_id}_{topic}".encode()).hexdigest()
-        cached = self.storage.get_cache(cache_key)
-        if cached:
-            return cached
-        
-        # تقسيم الكتاب إلى أجزاء
         chunks = []
         
-        # الجزء الأول: الهيكل العام
-        structure_prompt = f"""بناءً على المناقشة التالية حول "{topic}"،
-أعطني هيكل الكتاب مع عناوين الفصول الرئيسية:
-
-{discussion[:1000]}
-
-المطلوب:
-1. عنوان الكتاب
-2. قائمة الفصول (3-5 فصول)
-3. النقاط الرئيسية في كل فصل"""
-        
-        structure = await self.generate_book_chunk(structure_prompt, 1, 4)
+        # الجزء الأول: الهيكل
+        structure = await self.generate_book_chunk(
+            f"أعطني هيكل الكتاب عن: {topic}\n{discussion[:1000]}", 1, 4
+        )
         chunks.append(structure)
-        
         await asyncio.sleep(COOLDOWN_BETWEEN_CHUNKS)
         
-        # الجزء الثاني: المقدمة والفصل الأول
-        intro_prompt = f"""اكتب المقدمة والفصل الأول من الكتاب "{topic}".
-الهيكل المقترح:
-{structure[:500]}
-
-المقدمة: لماذا هذا الكتاب مهم؟
-الفصل الأول: ابدأ بأهم المفاهيم مع أمثلة واقعية"""
-        
-        chunk2 = await self.generate_book_chunk(intro_prompt, 2, 4)
-        chunks.append(chunk2)
-        
+        # الجزء الثاني: المقدمة
+        intro = await self.generate_book_chunk(
+            f"اكتب المقدمة والفصل الأول بناءً على: {structure[:500]}", 2, 4
+        )
+        chunks.append(intro)
         await asyncio.sleep(COOLDOWN_BETWEEN_CHUNKS)
         
         # الجزء الثالث: الفصول الوسطى
-        middle_prompt = f"""اكمل الفصول الوسطى من الكتاب "{topic}".
-تابع من حيث انتهينا:
-{chunk2[-500:]}
-
-أضف أمثلة عملية وحالات دراسية"""
+        middle = await self.generate_book_chunk(
+            f"اكمل الفصول الوسطى: {intro[-500:]}", 3, 4
+        )
+        chunks.append(middle)
+        await asyncio.sleep(COOLDOWN_BETWEEN_CHUNKS)
         
-        chunk3 = await self.generate_book_chunk(middle_prompt, 3, 4)
-        chunks.append(chunk3)
+        # الجزء الرابع: الخاتمة
+        conclusion = await self.generate_book_chunk(
+            f"اكتب الخاتمة للكتاب عن: {topic}", 4, 4
+        )
+        chunks.append(conclusion)
         
-        await aspońcio.sleep(COOLDOWN_BETWEEN_CHUNKS)
-        
-        # الجزء الرابع: الخاتمة والتوصيات
-        conclusion_prompt = f"""اكتب الخاتمة والتوصيات النهائية للكتاب "{topic}".
-الخاتمة: تلخيص لأهم النقاط
-التوصيات: خطوات عملية للقارئ
-المراجع: مصادر مقترحة"""
-        
-        chunk4 = await self.generate_book_chunk(conclusion_prompt, 4, 4)
-        chunks.append(chunk4)
-        
-        # دمج الأجزاء
-        full_book = "\n\n---\n\n".join(chunks)
-        
-        # حفظ في الكاش
-        self.storage.set_cache(cache_key, full_book, ttl=3600)  # ساعة واحدة
-        
-        return full_book
+        return "\n\n---\n\n".join(chunks)
     
     async def chat_response(self, message: str, history: list) -> str:
         """الرد على المحادثة"""
@@ -435,9 +352,7 @@ class AIService:
                 top_p=1,
                 stream=False
             )
-            
             return completion.choices[0].message.content
-            
         except Exception as e:
             logger.error(f"خطأ في الرد: {e}")
             return "عذراً، حدث خطأ. حاول مرة أخرى."
@@ -448,10 +363,10 @@ class EBookBot:
     def __init__(self, token: str, groq_key: str):
         self.token = token
         self.storage = StorageManager()
-        self.ai_service = AIService(groq_key, self.storage)
+        self.ai_service = AIService(groq_key)
         self.pdf_service = PDFService()
         
-        # إضافة المشرف الرئيسي
+        # إضافة المشرف
         if ADMIN_ID not in self.storage.users:
             admin = UserData(
                 user_id=ADMIN_ID,
@@ -473,45 +388,18 @@ class EBookBot:
 
 الميزات:
 • كتب بتنسيق PDF احترافي
-• نظام تبريد للمحرك للكتب الكبيرة
+• نظام تبريد للمحرك
 • تخزين مؤقت للجلسات
-• دعم كامل للغة العربية في PDF
 
-السعر: {BOOK_PRICE} نجمة للكتاب
-المستخدمون المميزون: إنشاء مجاني
+السعر: {BOOK_PRICE} نجمة
 
 الأوامر:
-/start - ترحيب
-/help - مساعدة
 /newbook - بدء كتاب جديد
 /build - إنشاء الكتاب
 /balance - رصيدي
 /cancel - إلغاء
 """
         await update.message.reply_text(welcome)
-    
-    async def help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        help_text = f"""
-طريقة الاستخدام:
-
-1 اكتب /newbook لبدء كتاب جديد
-2 ناقش فكرة كتابك مع البوت
-3 اكتب /build لإنشاء الكتاب
-4 استلم الكتاب كملف PDF
-
-نظام التبريد:
-• الكتب الكبيرة تقسم إلى أجزاء
-• كل جزء ينشأ بفاصل زمني
-• تخزين مؤقت للجلسة
-
-السعر: {BOOK_PRICE} نجمة
-
-أوامر المشرف:
-/add_free id - إضافة مستخدم مميز
-/remove_free id - إزالة مستخدم مميز
-/users - قائمة المستخدمين
-"""
-        await update.message.reply_text(help_text)
     
     async def newbook(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -521,11 +409,9 @@ class EBookBot:
             await update.message.reply_text("حسابك محظور.")
             return ConversationHandler.END
         
-        # إنشاء جلسة جديدة
         self.storage.create_session(user_id)
         
         await update.message.reply_text(
-            "بدأنا!\n\n"
             "أخبرني عن فكرة كتابك:\n"
             "- الموضوع الرئيسي\n"
             "- الجمهور المستهدف\n"
@@ -544,14 +430,11 @@ class EBookBot:
             await update.message.reply_text("ابدأ بـ /newbook أولاً")
             return ConversationHandler.END
         
-        # حفظ الموضوع من أول رسالة
         if not session.topic and len(session.messages) == 0:
             session.topic = message[:50]
         
-        # حفظ رسالة المستخدم
         session.messages.append({"role": "user", "content": message})
         
-        # إرسال رد
         await update.message.chat.send_action(action="typing")
         
         response = await self.ai_service.chat_response(
@@ -559,9 +442,7 @@ class EBookBot:
             session.messages[:-1]
         )
         
-        # حفظ الرد
         session.messages.append({"role": "assistant", "content": response})
-        
         await update.message.reply_text(response)
         
         return DISCUSSION
@@ -598,22 +479,14 @@ class EBookBot:
             for msg in session.messages
         ])
         
-        # إعلام المستخدم
         status = await update.message.reply_text(
             "جاري إنشاء كتابك...\n"
-            "قد تستغرق العملية دقيقتين للكتب الكبيرة.\n"
-            "نظام التبريد يعمل لتجنب الضغط على المحرك."
+            "قد تستغرق العملية دقيقتين."
         )
         
-        temp_file = None
-        
         try:
-            # توليد الكتاب مع نظام التبريد
-            book_content = await self.ai_service.generate_full_book(
-                discussion, 
-                topic,
-                user_id
-            )
+            # توليد الكتاب
+            book_content = await self.ai_service.generate_full_book(discussion, topic)
             
             # إنشاء PDF
             pdf_file = self.pdf_service.create_pdf(
@@ -622,17 +495,14 @@ class EBookBot:
                 user_data.first_name or "مستخدم"
             )
             
-            # حفظ المسار المؤقت
             self.storage.add_temp_file(user_id, pdf_file)
             
-            # تحديث إحصائيات المستخدم
+            # تحديث الإحصائيات
             user_data.total_books += 1
-            # تقدير عدد الصفحات (تقريباً)
             pages_estimate = len(book_content) // 1500 + 10
             user_data.total_pages += pages_estimate
             self.storage.save_users()
             
-            # إرسال الكتاب
             await status.delete()
             
             with open(pdf_file, 'rb') as f:
@@ -641,19 +511,18 @@ class EBookBot:
                     filename=f"كتاب_{topic[:30]}.pdf",
                     caption=f"تم إنشاء كتابك بنجاح!\n"
                            f"الموضوع: {topic}\n"
-                           f"عدد الصفحات التقديري: {pages_estimate}\n"
-                           f"إجمالي كتبك: {user_data.total_books}"
+                           f"الصفحات: ~{pages_estimate}"
                 )
             
-            # تنظيف الجلسة
+            # تنظيف الملفات القديمة (مرة واحدة كل 10 كتب)
+            if user_data.total_books % 10 == 0:
+                self.storage.cleanup_old_files()
+            
             self.storage.delete_session(user_id)
             
         except Exception as e:
             logger.error(f"خطأ: {e}")
-            await status.edit_text(
-                "حدث خطأ أثناء إنشاء الكتاب.\n"
-                "الرجاء المحاولة مرة أخرى لاحقاً."
-            )
+            await status.edit_text("حدث خطأ. حاول مرة أخرى.")
     
     async def balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
@@ -665,36 +534,26 @@ class EBookBot:
         
         role_names = {
             UserRole.ADMIN: "مشرف",
-            UserRole.FREE_USER: "مستخدم مميز (مجاني)",
-            UserRole.REGULAR: "مستخدم عادي"
+            UserRole.FREE_USER: "مميز (مجاني)",
+            UserRole.REGULAR: "عادي"
         }
         
         text = f"""
-معلومات حسابك:
-
 الرصيد: {user_data.balance} نجمة
 الدور: {role_names[user_data.role]}
-الكتب المنشأة: {user_data.total_books} كتاب
-إجمالي الصفحات: {user_data.total_pages} صفحة
-سعر الكتاب: {BOOK_PRICE} نجمة
-
-{'' if user_data.role in [UserRole.ADMIN, UserRole.FREE_USER] else 'تحتاج لدفع مقابل كل كتاب'}
+الكتب: {user_data.total_books}
+الصفحات: ~{user_data.total_pages}
+السعر: {BOOK_PRICE} نجمة
 """
         await update.message.reply_text(text)
     
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
-        
         self.storage.delete_session(user_id)
-        
-        await update.message.reply_text(
-            "تم الإلغاء.\n"
-            "يمكنك بدء كتاب جديد بـ /newbook"
-        )
+        await update.message.reply_text("تم الإلغاء.")
         return ConversationHandler.END
     
-    # ========== أوامر المشرف ==========
-    
+    # أوامر المشرف
     async def add_free(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         
@@ -704,16 +563,13 @@ class EBookBot:
         
         try:
             target = int(context.args[0])
-            
             if target not in self.storage.users:
                 self.storage.create_user(target)
             
             self.storage.users[target].role = UserRole.FREE_USER
             self.storage.save_users()
-            
-            await update.message.reply_text(f"تمت إضافة {target} كمستخدم مميز")
-            
-        except (IndexError, ValueError):
+            await update.message.reply_text(f"تمت إضافة {target}")
+        except:
             await update.message.reply_text("استخدم: /add_free user_id")
     
     async def remove_free(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -725,15 +581,11 @@ class EBookBot:
         
         try:
             target = int(context.args[0])
-            
             if target in self.storage.users:
                 self.storage.users[target].role = UserRole.REGULAR
                 self.storage.save_users()
-                await update.message.reply_text(f"تمت إزالة الصلاحية عن {target}")
-            else:
-                await update.message.reply_text("مستخدم غير موجود")
-                
-        except (IndexError, ValueError):
+                await update.message.reply_text(f"تمت إزالة {target}")
+        except:
             await update.message.reply_text("استخدم: /remove_free user_id")
     
     async def users_list(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -743,8 +595,7 @@ class EBookBot:
             await update.message.reply_text("غير مصرح")
             return
         
-        text = "قائمة المستخدمين:\n\n"
-        
+        text = "المستخدمين:\n\n"
         for uid, user in list(self.storage.users.items())[:20]:
             role_icon = {
                 UserRole.ADMIN: "👑",
@@ -752,11 +603,8 @@ class EBookBot:
                 UserRole.REGULAR: "👤"
             }[user.role]
             
-            block = "🔴" if user.is_blocked else "🟢"
-            
-            text += f"{block} {role_icon} {uid}: {user.first_name}\n"
-            text += f"   الرصيد: {user.balance} | الكتب: {user.total_books}\n"
-            text += f"   المستخدم: @{user.username or 'لا يوجد'}\n\n"
+            text += f"{role_icon} {uid}: {user.first_name}\n"
+            text += f"   الرصيد: {user.balance} | الكتب: {user.total_books}\n\n"
         
         await update.message.reply_text(text)
     
@@ -764,14 +612,11 @@ class EBookBot:
         """تشغيل البوت"""
         app = Application.builder().token(self.token).build()
         
-        # الأوامر الأساسية
+        # الأوامر
         app.add_handler(CommandHandler("start", self.start))
-        app.add_handler(CommandHandler("help", self.help))
         app.add_handler(CommandHandler("balance", self.balance))
         app.add_handler(CommandHandler("build", self.build))
         app.add_handler(CommandHandler("cancel", self.cancel))
-        
-        # أوامر المشرف
         app.add_handler(CommandHandler("add_free", self.add_free))
         app.add_handler(CommandHandler("remove_free", self.remove_free))
         app.add_handler(CommandHandler("users", self.users_list))
@@ -788,15 +633,7 @@ class EBookBot:
         )
         app.add_handler(conv)
         
-        # تنظيف دوري كل ساعة
-        async def periodic_cleanup():
-            while True:
-                await asyncio.sleep(3600)
-                self.storage._cleanup_old_files()
-        
-        asyncio.create_task(periodic_cleanup())
-        
-        logger.info("البوت يعمل مع نظام PDF والتبريد...")
+        logger.info("✅ البوت يعمل...")
         app.run_polling()
 
 # ==================== التشغيل ====================
