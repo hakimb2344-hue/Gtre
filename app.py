@@ -33,18 +33,6 @@ client = OpenAI(
 
 # ==== برومبت داخلي قوي لإنشاء المواقع ====
 FORGE_PROMPT = """
-أنت أداة ForgeFlow-Bot المتقدمة لإنشاء مواقع ويب كاملة، مبدعة، وحديثة، 
-تستجيب لحجم الشاشة وتبدو احترافية على الموبايل والحاسوب. 
-عند استلام وصف المستخدم:
-1. ابتكر موقع كامل في ملف HTML واحد، يحتوي على:
-   - صفحة رئيسية جذابة مع شعار واسم "حسبما يطاب المستخدم".
-   - ميزات الأداة مميزة بألوان وأيقونات جذابة.
-   - خطوات الاستخدام بشكل واضح.
-   - نموذج تواصل وروابط التواصل.
-   - تصميم متجاوب (Responsive) لكل الشاشات.
-2. قسم النصوص الطويلة ليتم توليدها تدريجيًا إذا كان كبير جدًا (progressive build).
-3. كن مبدعًا، أضف تفاصيل واقعية، ألوان دافئة، خطوط حديثة.
-4. أعد إخراج HTML جاهز للتحميل مباشرة.
 [SYSTEM INSTRUCTION - READ CAREFULLY]
 
 You are an expert Frontend Developer and a professional UI/UX Designer. Your task is to build a complete, clean, and production-ready website based on the description and specifications provided below.
