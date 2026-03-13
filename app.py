@@ -5,219 +5,173 @@ import sqlite3
 from groq import Groq
 from telegram import Update, LabeledPrice
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler
-from fpdf import FPDF
-import arabic_reshaper
-from bidi.algorithm import get_display
 
-# --- الإعدادات والتوكنات ---
+# --- الإعدادات الأساسية ---
 GROQ_API_KEY = "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"
 TELEGRAM_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
 ADMIN_ID = 8443969410
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# --- نظام قاعدة البيانات (لضمان عدم ضياع العمل) ---
+# إعداد السجلات (Logs) لمراقبة الأداء
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- نظام قاعدة البيانات (الذاكرة الدائمة) ---
 def init_db():
-    conn = sqlite3.connect('ebook_engine.db')
+    conn = sqlite3.connect('ebook_master.db')
     c = conn.cursor()
-    # تخزين سجل النقاش
+    # سجل النقاش
     c.execute('''CREATE TABLE IF NOT EXISTS chat_history (user_id INTEGER, role TEXT, content TEXT)''')
-    # تخزين الفصول ونسبة الإنجاز
+    # سجل الفصول (للتكملة من حيث التوقف)
     c.execute('''CREATE TABLE IF NOT EXISTS book_progress (user_id INTEGER, title TEXT, content TEXT)''')
-    # تخزين مستخدمي الـ VIP
-    c.execute('''CREATE TABLE IF NOT EXISTS vips (user_id INTEGER PRIMARY KEY)''')
     conn.commit()
     conn.close()
 
 init_db()
 
-# --- محرك صناعة الـ PDF الاحترافي ---
-def create_ebook_pdf(chapters, filename):
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    
-    # تحميل الخط العربي (يجب توفر ملف arial.ttf في المجلد)
-    try:
-        pdf.add_font('ArabicFont', '', 'arial.ttf', uni=True)
-        pdf.set_font('ArabicFont', size=14)
-    except:
-        pdf.set_font("Arial", size=12)
+# --- محرك الذكاء الاصطناعي مع نظام الحماية من الانهيار (Retry Logic) ---
+async def safe_ai_request(messages, retries=5):
+    """دالة لطلب البيانات مع معالجة خطأ 429 والتوقف المفاجئ"""
+    for i in range(retries):
+        try:
+            completion = client.chat.completions.create(
+                model="openai/gpt-oss-120b",
+                messages=messages,
+                temperature=0.8,
+                max_completion_tokens=4000
+            )
+            return completion.choices[0].message.content
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str:
+                print(f"⚠️ المحرك ساخن جداً (Rate Limit). انتظار 30 ثانية... محاولة {i+1}")
+                await asyncio.sleep(30)
+            else:
+                print(f"❌ خطأ غير متوقع: {error_str}. محاولة {i+1}")
+                await asyncio.sleep(5)
+    return None
 
-    reshaper = arabic_reshaper.ArabicReshaper({'delete_harakat': False, 'support_ligatures': True})
-
-    for title, content in chapters:
-        pdf.add_page()
-        
-        # تنسيق العنوان (بدون رموز، بخط كبير ولون ملكي)
-        pdf.set_font('ArabicFont', size=22)
-        pdf.set_text_color(44, 62, 80)
-        clean_title = title.replace('#', '').replace('*', '').strip()
-        pdf.multi_cell(190, 15, txt=get_display(reshaper.reshape(clean_title)), align='C')
-        
-        pdf.ln(10) # مسافة بعد العنوان
-        
-        # تنسيق المحتوى (تنظيف الرموز ومحاذاة اليمين)
-        pdf.set_font('ArabicFont', size=15)
-        pdf.set_text_color(0, 0, 0)
-        clean_content = content.replace('#', '').replace('*', '').strip()
-        pdf.multi_cell(190, 10, txt=get_display(reshaper.reshape(clean_content)), align='R')
-
-    # --- إضافة خاتمة في نهاية آخر صفحة كما طلبت ---
-    pdf.ln(20)
-    pdf.set_draw_color(200, 200, 200)
-    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
-    pdf.ln(5)
-    pdf.set_font('ArabicFont', size=11)
-    pdf.set_text_color(120, 120, 120)
-    conclusion = "تم اكتمال الكتاب بنجاح من السيرفر حتى الحرف الأخير - تم مسح الذاكرة المؤقتة."
-    pdf.multi_cell(190, 10, txt=get_display(reshaper.reshape(conclusion)), align='C')
-
-    pdf.output(filename)
-
-# --- وظائف البوت الأساسية ---
+# --- أوامر البوت ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
     await update.message.reply_text(
-        "📚 **أهلاً بك في نظام صناعة الكتب الضخمة!**\n\n"
-        "ناقشني في محتوى كتابك، وعند الجاهزية أرسل أمر /build.\n"
-        "النظام يحفظ تقدمك تلقائياً؛ إذا توقف المحرك سيكمل من حيث توقف."
+        "📚 **مرحباً بك في المحرك السيادي لصناعة الكتب.**\n\n"
+        "1. ناقشني في موضوع كتابك بالتفصيل.\n"
+        "2. عند الجاهزية، أرسل /build.\n"
+        "3. سيقوم البوت بتأليف الكتاب فصلاً فصلاً وحفظ التقدم تلقائياً."
     )
 
 async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = update.message.text
 
-    conn = sqlite3.connect('ebook_engine.db')
+    conn = sqlite3.connect('ebook_master.db')
     conn.execute("INSERT INTO chat_history VALUES (?, ?, ?)", (user_id, "user", text))
     conn.commit()
 
-    # جلب التاريخ الكامل للذكاء الاصطناعي
+    # جلب السجل الكامل للرد بذكاء
     cursor = conn.execute("SELECT role, content FROM chat_history WHERE user_id=?", (user_id,))
     history = [{"role": r[0], "content": r[1]} for r in cursor.fetchall()]
     
-    try:
-        completion = client.chat.completions.create(
-            model="openai/gpt-oss-120b", 
-            messages=history,
-            temperature=1
-        )
-        ai_msg = completion.choices[0].message.content
-        conn.execute("INSERT INTO chat_history VALUES (?, ?, ?)", (user_id, "assistant", ai_msg))
+    response = await safe_ai_request(history)
+    if response:
+        conn.execute("INSERT INTO chat_history VALUES (?, ?, ?)", (user_id, "assistant", response))
         conn.commit()
-        await update.message.reply_text(ai_msg)
-    except Exception as e:
-        await update.message.reply_text("⚠️ المحرك مشغول قليلاً، لكنني حفظت كلامك. حاول مرة أخرى لاحقاً.")
-    finally:
-        conn.close()
-
-async def build_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    
-    # فحص إذا كان الأدمن أو VIP
-    conn = sqlite3.connect('ebook_engine.db')
-    is_vip = conn.execute("SELECT 1 FROM vips WHERE user_id=?", (user_id,)).fetchone()
+        await update.message.reply_text(response)
+    else:
+        await update.message.reply_text("⚠️ المحرك مشغول حالياً، ولكنني حفظت بياناتك. حاول مراسلتي بعد قليل.")
     conn.close()
 
-    if user_id == ADMIN_ID or is_vip:
-        await start_writing_process(update, context)
-    else:
-        # طلب الدفع بالنجوم
-        await context.bot.send_invoice(
-            chat_id=user_id,
-            title="إنشاء الكتاب الورقي",
-            description="تحويل النقاش إلى ملف PDF احترافي ضخم.",
-            payload="ebook_pay",
-            currency="XTR",
-            prices=[LabeledPrice("الخدمة", 25)],
-            provider_token=""
-        )
-
-async def pre_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.pre_checkout_query.answer(ok=True)
-
-async def start_writing_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id if update.message else update.callback_query.from_user.id
-    conn = sqlite3.connect('ebook_engine.db')
+async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     
-    history = [{"role": r[0], "content": r[1]} for r in conn.execute("SELECT role, content FROM chat_history WHERE user_id=?", (user_id,)).fetchall()]
-    if not history:
-        await context.bot.send_message(user_id, "❌ لا يوجد نقاش سابق. ابدأ بالتحدث معي أولاً!")
+    # التحقق من الصلاحيات (أدمن فقط أو دفع نجوم)
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("🚧 هذه الميزة تتطلب صلاحيات خاصة أو دفع رسوم الإنشاء.")
         return
 
-    status = await context.bot.send_message(user_id, "🔍 فحص التقدم... سيتم التكملة من حيث توقفنا.")
+    await process_book_construction(update, context)
 
-    # 1. نظام التكملة: تحديد الفصول إذا لم تكن موجودة
-    check = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
-    if not check:
-        await status.edit_text("📋 جاري وضع خطة الفصول النهائية...")
-        plan_prompt = history + [{"role": "system", "content": "أعطني قائمة بـ 6 عناوين فصول للكتاب، كل عنوان في سطر، بدون رموز."}]
-        res = client.chat.completions.create(model="openai/gpt-oss-120b", messages=plan_prompt)
-        titles = [t.strip() for t in res.choices[0].message.content.split('\n') if t.strip()]
+async def process_book_construction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    conn = sqlite3.connect('ebook_master.db')
+    
+    # جلب النقاش لبناء المحتوى بناءً عليه
+    history_rows = conn.execute("SELECT role, content FROM chat_history WHERE user_id=?", (user_id,)).fetchall()
+    if not history_rows:
+        await update.message.reply_text("❌ الذاكرة فارغة. ناقشني أولاً في موضوع الكتاب.")
+        return
+    
+    history = [{"role": r[0], "content": r[1]} for r in history_rows]
+    status_msg = await update.message.reply_text("🔄 جاري فحص نظام التكملة وبدء البناء...")
+
+    # 1. المرحلة الأولى: وضع الخطة (إذا لم تكن موجودة)
+    check_plan = conn.execute("SELECT title FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
+    if not check_plan:
+        await status_msg.edit_text("📋 جاري وضع خطة الفصول (تجنب الرموز)...")
+        plan_prompt = history + [{"role": "system", "content": "أعطني قائمة بـ 6 عناوين فصول دسمة، كل عنوان في سطر مستقل، بدون أرقام أو رموز (#, *)."}]
+        plan_text = await safe_ai_request(plan_prompt)
+        
+        if not plan_text:
+            await status_msg.edit_text("❌ فشل المحرك في الاستجابة. حاول /build مرة أخرى.")
+            return
+
+        titles = [t.strip() for t in plan_text.split('\n') if t.strip()]
         for t in titles:
             conn.execute("INSERT INTO book_progress VALUES (?, ?, ?)", (user_id, t, ""))
         conn.commit()
-        check = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
+        log_info = "تم إنشاء خطة فصول جديدة."
+    else:
+        log_info = "تم العثور على خطة فصول سابقة، جاري التكملة..."
 
-    # 2. تأليف الفصول (نظام الراحة وتجنب الحظر)
-    for title, content in check:
-        if not content: # فصل لم يكتمل
-            await status.edit_text(f"✍️ جاري تأليف: {title}...")
-            await asyncio.sleep(4) # راحة للمحرك
+    # 2. المرحلة الثانية: تأليف المحتوى (نظام الفصل تلو الآخر)
+    chapters = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
+    
+    for title, content in chapters:
+        if not content or content == "":
+            await status_msg.edit_text(f"✍️ جاري تأليف: {title}\n(يرجى الانتظار، النظام يعمل بنظام التبريد)")
             
-            write_prompt = history + [{"role": "system", "content": f"اكتب محتوى الفصل التالي بالتفصيل: {title}. تجنب رموز # و * نهائياً."}]
-            try:
-                c_res = client.chat.completions.create(model="openai/gpt-oss-120b", messages=write_prompt)
-                c_body = c_res.choices[0].message.content
-                conn.execute("UPDATE book_progress SET content=? WHERE user_id=? AND title=?", (c_body, user_id, title))
+            write_prompt = history + [{"role": "system", "content": f"اكتب فصلاً كاملاً وعميقاً بعنوان ({title}). يمنع استخدام النجوم أو الهاشتاقات. استخدم فقرات واضحة."}]
+            chapter_body = await safe_ai_request(write_prompt)
+            
+            if chapter_body:
+                conn.execute("UPDATE book_progress SET content=? WHERE user_id=? AND title=?", (chapter_body, user_id, title))
                 conn.commit()
-            except:
-                await context.bot.send_message(user_id, "⚠️ توقف المحرك بسبب الضغط. أرسل /build مجدداً وسأكمل فوراً!")
+                # تبريد وقائي لتجنب خطأ 429
+                await asyncio.sleep(12) 
+            else:
+                await update.message.reply_text("⚠️ انقطع الاتصال أثناء تأليف الكتاب. أرسل /build للتكملة من نفس النقطة.")
                 conn.close()
                 return
 
-    # 3. التجميع والمسح النهائي
-    await status.edit_text("📚 تجميع الفصول وإضافة خاتمة السيرفر...")
-    final_chapters = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
+    # 3. المرحلة الثالثة: التجميع النهائي والتحميل
+    await status_msg.edit_text("📚 تجميع الفصول وإضافة خاتمة السيرفر...")
+    final_data = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
     
-    pdf_path = f"Ebook_{user_id}.pdf"
-    create_ebook_pdf(final_chapters, pdf_path)
+    filename = f"Ebook_{user_id}.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"مخطوطة كتاب رقمي\n{'='*20}\n")
+        for t, c in final_data:
+            f.write(f"\n[ {t} ]\n\n{c}\n\n")
+        f.write(f"\n{'='*20}\nتم اكتمال الكتاب بنجاح من السيرفر حتى الحرف الأخير - تم مسح الذاكرة المؤقتة.")
 
-    with open(pdf_path, 'rb') as f:
-        await context.bot.send_document(chat_id=user_id, document=f, caption="✅ تم الإرسال بنجاح. ذاكرة السيرفر نظيفة الآن.")
+    with open(filename, "rb") as f:
+        await context.bot.send_document(chat_id=user_id, document=f, caption="✅ تم إنتاج الكتاب بنجاح!")
 
-    # مسح شامل بعد النجاح
+    # مسح الذاكرة بعد النجاح التام فقط
     conn.execute("DELETE FROM chat_history WHERE user_id=?", (user_id,))
     conn.execute("DELETE FROM book_progress WHERE user_id=?", (user_id,))
     conn.commit()
     conn.close()
-    os.remove(pdf_path)
+    os.remove(filename)
 
-# --- أوامر الإدارة ---
-
-async def add_vip(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        v_id = int(context.args[0])
-        conn = sqlite3.connect('ebook_engine.db')
-        conn.execute("INSERT OR REPLACE INTO vips VALUES (?)", (v_id,))
-        conn.commit()
-        conn.close()
-        await update.message.reply_text(f"✅ المستخدم {v_id} صار VIP الآن.")
-    except:
-        await update.message.reply_text("⚠️ `/add_vip ID`")
-
-# --- التشغيل الرئيسي ---
-
+# --- التشغيل ---
 if __name__ == '__main__':
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("build", build_request))
-    app.add_handler(CommandHandler("add_vip", add_vip))
-    app.add_handler(PreCheckoutQueryHandler(pre_checkout_callback))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, start_writing_process))
+    app.add_handler(CommandHandler("build", build_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
     
-    print("المحرك يعمل بأقصى طاقة...")
+    print("🚀 البوت يعمل الآن بنظام التكملة التلقائية ومكافحة الأخطاء...")
     app.run_polling()
