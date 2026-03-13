@@ -1,124 +1,113 @@
 import os
 import time
-import asyncio
-from groq import Groq, RateLimitError
+import json
+import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from fpdf import FPDF
 
 # --- الإعدادات ---
-GROQ_API_KEY = "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"
+API_KEY = "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"
 TELEGRAM_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-client = Groq(api_key=GROQ_API_KEY)
-
-# --- كلاس إنشاء الـ PDF يدعم العربية ---
+# --- كلاس إنشاء الـ PDF ---
 class AI_Book_PDF(FPDF):
     def __init__(self):
         super().__init__()
-        # ملاحظة: ليدعم العربية يجب تحميل خط وتفعيله هنا
-        # self.add_font('ArabicFont', '', 'arial.ttf', unicode=True) 
         self.set_auto_page_break(auto=True, margin=15)
         
     def header(self):
-        self.set_font('Helvetica', 'B', 8)
-        self.cell(0, 10, 'AI Generated Masterpiece', 0, 1, 'C')
+        self.set_font('Arial', 'B', 8)
+        self.cell(0, 10, 'AI Digital Book - Auto Generated', 0, 1, 'C')
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Helvetica', 'I', 8)
-        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
-
-# --- دالة التوليد مع نظام التبريد والتخزين ---
-async def generate_chapter_with_retry(prompt, retries=5):
-    """دالة تحاول التوليد وإذا واجهت زحمة (Rate Limit) تنتظر 10 ثوانٍ"""
-    for i in range(retries):
-        try:
-            completion = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7,
-                max_completion_tokens=4000 # زيادة عدد الكلمات للفصل الواحد
-            )
-            return completion.choices[0].message.content
-        except RateLimitError:
-            print(f"Rate limit hit, sleeping 10s... (Attempt {i+1})")
-            time.sleep(10)
-        except Exception as e:
-            print(f"Error: {e}")
-            time.sleep(5)
-    return None
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("مرحباً بك في بوت صناعة الكتب الذكي! 📚\nأرسل لي عنوان الكتاب وسأقوم بإنتاجه في 20 صفحة PDF.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    topic = update.message.text
-    status_msg = await update.message.reply_text(f"🚀 بدأت العمل على كتاب: {topic}\nجاري التخطيط للفصول...")
-
-    # 1. إنشاء الفهرس (15 - 20 فصل لضمان طول الكتاب)
-    outline_prompt = f"قم بإنشاء فهرس كتاب مفصل جداً عن '{topic}'. أريد 15 عنواناً للفصول. اجعل العناوين جذابة ومزخرفة بمارك داون. أجب بالعناوين فقط."
-    outline_text = await generate_chapter_with_retry(outline_prompt)
+# --- دالة إرسال الطلب عبر Requests مع نظام التبريد ---
+def call_groq_api(prompt):
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
     
-    if not outline_text:
-        await status_msg.edit_text("عذراً، واجهت مشكلة في الاتصال بـ Groq. حاول لاحقاً.")
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.7
+    }
+
+    while True:
+        try:
+            response = requests.post(GROQ_URL, headers=headers, json=payload)
+            
+            if response.status_code == 200:
+                return response.json()['choices'][0]['message']['content']
+            
+            elif response.status_code == 429: # خطأ التبريد (Too Many Requests)
+                print("❄️ Cooldown: Rate limit reached. Waiting 10 seconds...")
+                time.sleep(10)
+            
+            else:
+                print(f"❌ Error {response.status_code}: {response.text}")
+                return None
+        except Exception as e:
+            print(f"⚠️ Connection Error: {e}")
+            time.sleep(5)
+
+# --- معالجة طلب البوت ---
+async def handle_book_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text
+    status_msg = await update.message.reply_text(f"⏳ جاري تحضير كتابك: {topic}\nيتم الآن توليد الفهرس...")
+
+    # 1. توليد الفهرس
+    outline_prompt = f"أنشئ فهرس كتاب 'مارك داون' مزخرف عن {topic}. يتكون من 10 فصول. أجب بالعناوين فقط."
+    outline = call_groq_api(outline_prompt)
+    
+    if not outline:
+        await status_msg.edit_text("❌ فشل الاتصال بالسيرفر. تأكد من مفتاح الـ API.")
         return
 
-    chapters = [line.strip() for line in outline_text.split('\n') if len(line.strip()) > 5][:15]
+    chapters = [c.strip() for c in outline.split('\n') if len(c.strip()) > 3]
     
-    # 2. نظام التخزين المؤقت (المصفوفة)
-    book_storage = []
     pdf = AI_Book_PDF()
-    
-    # 3. توليد المحتوى فصلاً فصلاً
-    for index, title in enumerate(chapters):
-        current_step = f"📝 جاري كتابة الفصل {index+1} من {len(chapters)}:\n{title}"
-        await status_msg.edit_text(f"{current_step}\n(يتم الحفظ في التخزين المؤقت...)")
+    book_storage = []
 
-        chapter_prompt = f"""
-        اكتب محتوى الفصل التالي لكتاب عن '{topic}'.
-        العنوان: {title}.
-        المطلوب: كتابة محتوى طويل جداً ممتد (شرح مفصل، أمثلة، نصائح).
-        استخدم لغة عربية فصحى وتنسيق مارك داون (عناوين فرعية، نقاط، زخرفة).
-        اجعل الفصل يملأ صفحتين على الأقل من المعلومات القيمة.
-        """
+    # 2. توليد الفصول مع التخزين المؤقت
+    for i, title in enumerate(chapters):
+        await status_msg.edit_text(f"✍️ جاري كتابة الفصل {i+1} من {len(chapters)}...\n(تم حفظ {len(book_storage)} فصول في الذاكرة)")
         
-        content = await generate_chapter_with_retry(chapter_prompt)
+        chapter_prompt = f"اكتب فصلاً كاملاً ومفصلاً عن '{title}' ضمن كتاب '{topic}'. استخدم تنسيق Markdown وزخارف للعناوين. اجعل النص طويلاً جداً وقيمًا."
+        content = call_groq_api(chapter_prompt)
         
         if content:
-            # تخزين في الذاكرة المؤقتة
             book_storage.append({"title": title, "content": content})
             
-            # إضافة للفصل في ملف الـ PDF فوراً
+            # إضافة للـ PDF
             pdf.add_page()
-            pdf.set_font('Helvetica', 'B', 16)
-            # ملاحظة: تم استخدام Helvetica للإنجليزية، للعربية استخدم الخط الذي ستحمله
+            pdf.set_font("Arial", 'B', 16)
             pdf.multi_cell(0, 10, txt=title.encode('latin-1', 'ignore').decode('latin-1'), align='C')
-            pdf.ln(10)
-            pdf.set_font('Helvetica', '', 12)
+            pdf.ln(5)
+            pdf.set_font("Arial", size=12)
             pdf.multi_cell(0, 10, txt=content.encode('latin-1', 'ignore').decode('latin-1'))
-        
-        # تبريد بسيط بين كل فصل وفصل لتجنب الحظر
-        await asyncio.sleep(2)
 
-    # 4. إنهاء الملف وإرساله
-    file_name = f"Book_{int(time.time())}.pdf"
-    pdf.output(file_name)
+    # 3. حفظ وإرسال
+    file_path = f"book_{update.message.chat_id}.pdf"
+    pdf.output(file_path)
     
-    await status_msg.edit_text("✅ اكتمل الكتاب بنجاح! جاري إرسال الملف...")
-    await update.message.reply_document(document=open(file_name, 'rb'), caption=f"إليك كتابك حول: {topic}")
-    
-    # تنظيف الملفات
-    os.remove(file_name)
+    await status_msg.edit_text("✅ اكتمل الكتاب! جاري الرفع...")
+    await update.message.reply_document(document=open(file_path, 'rb'), caption=f"كتابك حول: {topic}")
+    os.remove(file_path)
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("أهلاً بك! أرسل لي أي موضوع وسأصنع لك كتاباً كاملاً بصيغة PDF.")
+
+# --- تشغيل البوت ---
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_book_request))
     
-    print("البوت يعمل الآن...")
-    app.run_polling()
+    print("Bot is running via Requests...")
+    application.run_polling()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
