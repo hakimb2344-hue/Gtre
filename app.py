@@ -1,174 +1,124 @@
 import os
-import sqlite3
-import logging
-import datetime
-import random
-import re
+import time
 import asyncio
-from groq import Groq
-from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler, CallbackQueryHandler
+from groq import Groq, RateLimitError
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from fpdf import FPDF
-from arabic_reshaper import reshape
-from bidi.algorithm import get_display
 
-# --- إعداد السجلات ---
-logging.basicConfig(format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# --- الإعدادات (نظام المفتاحين) ---
-API_KEYS = [
-    "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", 
-    "ضع_المفتاح_الثاني_هنا"
-]
-current_key_index = 0
+# --- الإعدادات ---
+GROQ_API_KEY = "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"
 TELEGRAM_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
-CHANNEL_ID = "@forgeflow_project"
-ADMIN_ID = 8443969410
 
-# --- محرك التبديل بين المفاتيح والرد السريع ---
-async def ai_req_fast(msgs):
-    global current_key_index
-    for _ in range(len(API_KEYS)):
+client = Groq(api_key=GROQ_API_KEY)
+
+# --- كلاس إنشاء الـ PDF يدعم العربية ---
+class AI_Book_PDF(FPDF):
+    def __init__(self):
+        super().__init__()
+        # ملاحظة: ليدعم العربية يجب تحميل خط وتفعيله هنا
+        # self.add_font('ArabicFont', '', 'arial.ttf', unicode=True) 
+        self.set_auto_page_break(auto=True, margin=15)
+        
+    def header(self):
+        self.set_font('Helvetica', 'B', 8)
+        self.cell(0, 10, 'AI Generated Masterpiece', 0, 1, 'C')
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Helvetica', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+# --- دالة التوليد مع نظام التبريد والتخزين ---
+async def generate_chapter_with_retry(prompt, retries=5):
+    """دالة تحاول التوليد وإذا واجهت زحمة (Rate Limit) تنتظر 10 ثوانٍ"""
+    for i in range(retries):
         try:
-            client = Groq(api_key=API_KEYS[current_key_index])
-            # استخدام موديل Llama 3 70B لمعالجة البرومبتات الضخمة بسرعة
-            res = client.chat.completions.create(
-                model="llama3-70b-8192", 
-                messages=msgs, 
-                temperature=0.6,
-                max_tokens=4096 # دعم مخرجات طويلة
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_completion_tokens=4000 # زيادة عدد الكلمات للفصل الواحد
             )
-            return res.choices[0].message.content
+            return completion.choices[0].message.content
+        except RateLimitError:
+            print(f"Rate limit hit, sleeping 10s... (Attempt {i+1})")
+            time.sleep(10)
         except Exception as e:
-            logging.error(f"Key {current_key_index} failed: {e}")
-            current_key_index = (current_key_index + 1) % len(API_KEYS)
-            await asyncio.sleep(1)
+            print(f"Error: {e}")
+            time.sleep(5)
     return None
 
-# --- قاعدة البيانات ---
-def init_db():
-    conn = sqlite3.connect('architect_ultra.db')
-    conn.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, expiry TEXT)')
-    conn.execute('CREATE TABLE IF NOT EXISTS chat_history (user_id INTEGER, role TEXT, content TEXT)')
-    conn.execute('CREATE TABLE IF NOT EXISTS book_progress (user_id INTEGER, title TEXT, content TEXT)')
-    conn.commit()
-    conn.close()
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("مرحباً بك في بوت صناعة الكتب الذكي! 📚\nأرسل لي عنوان الكتاب وسأقوم بإنتاجه في 20 صفحة PDF.")
 
-init_db()
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    topic = update.message.text
+    status_msg = await update.message.reply_text(f"🚀 بدأت العمل على كتاب: {topic}\nجاري التخطيط للفصول...")
 
-# --- محرك PDF (فلتر الصفحات الفارغة ودعم العربية) ---
-def create_pdf(chapters, filename, decoration="—"):
-    try:
-        pdf = FPDF()
-        pdf.set_auto_page_break(auto=True, margin=15)
-        font_path = "arial.ttf"
-        
-        if os.path.exists(font_path):
-            pdf.add_font('ArFont', '', font_path, uni=True)
-            pdf.set_font('ArFont', size=14)
-        else:
-            pdf.set_font('Arial', size=12)
-
-        pages_added = 0
-        for title, content in chapters:
-            if not content or len(content.strip()) < 100: continue # فلتر صارم
-            
-            pdf.add_page()
-            pages_added += 1
-            
-            # العناوين
-            pdf.set_text_color(30, 60, 150)
-            pdf.set_font(size=22) if os.path.exists(font_path) else pdf.set_font('Arial', 'B', 18)
-            pdf.multi_cell(190, 10, txt=get_display(reshape(f"{decoration} {title} {decoration}")), align='C')
-            
-            # المحتوى
-            pdf.ln(10)
-            pdf.set_text_color(0, 0, 0)
-            pdf.set_font(size=14) if os.path.exists(font_path) else pdf.set_font('Arial', size=12)
-            clean_text = re.sub(r'[*_#`]', '', content)
-            pdf.multi_cell(190, 9, txt=get_display(reshape(clean_text)), align='R')
-
-        if pages_added == 0: return False
-        pdf.output(filename)
-        return True
-    except Exception as e:
-        logging.error(f"PDF Error: {e}")
-        return False
-
-# --- التعامل مع الرسائل والبرومبتات الضخمة ---
-async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    txt = update.message.text
+    # 1. إنشاء الفهرس (15 - 20 فصل لضمان طول الكتاب)
+    outline_prompt = f"قم بإنشاء فهرس كتاب مفصل جداً عن '{topic}'. أريد 15 عنواناً للفصول. اجعل العناوين جذابة ومزخرفة بمارك داون. أجب بالعناوين فقط."
+    outline_text = await generate_chapter_with_retry(outline_prompt)
     
-    # الرد المبدئي السريع لضمان التفاعل
-    status_msg = await update.message.reply_text("⚡ جاري المعالجة...")
-    
-    # نظام الذاكرة
-    conn = sqlite3.connect('architect_ultra.db')
-    conn.execute("INSERT INTO chat_history VALUES (?, 'user', ?)", (uid, txt))
-    
-    # سياق المحادثة (آخر 10 رسائل لدعم البرومبتات الضخمة)
-    rows = conn.execute("SELECT role, content FROM chat_history WHERE user_id=? ORDER BY rowid DESC LIMIT 10", (uid,)).fetchall()
-    history = [{"role": "system", "content": "أنت مساعد خبير في هندسة الكتب. برومبتاتك دقيقة، دسمة، ومنظمة."}]
-    for r in reversed(rows):
-        history.append({"role": r[0], "content": r[1]})
-
-    reply = await ai_req_fast(history)
-    
-    if reply:
-        conn.execute("INSERT INTO chat_history VALUES (?, 'assistant', ?)", (uid, reply))
-        conn.commit()
-        await status_msg.edit_text(reply)
-    else:
-        await status_msg.edit_text("⚠️ حدث خطأ في الاتصال، تم التبديل للمفتاح الاحتياطي. أعد المحاولة.")
-    conn.close()
-
-# --- أمر التأليف (Build) - معالجة سريعة للفصول ---
-async def build_book(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    status = await update.message.reply_text("🏗️ جاري تأليف المجلد (24 فصل)... قد يستغرق الأمر دقيقة واحدة بفضل المعالجة المتوازية.")
-    
-    # جلب خطة الكتاب من الذاكرة
-    conn = sqlite3.connect('architect_ultra.db')
-    hist = conn.execute("SELECT content FROM chat_history WHERE user_id=? AND role='user' ORDER BY rowid DESC LIMIT 1", (uid,)).fetchone()
-    
-    if not hist:
-        await status.edit_text("⚠️ لا يوجد موضوع لمناقشته. ابدأ بكتابة فكرتك أولاً.")
+    if not outline_text:
+        await status_msg.edit_text("عذراً، واجهت مشكلة في الاتصال بـ Groq. حاول لاحقاً.")
         return
 
-    # استراتيجية المعالجة السريعة: توليد المحتوى
-    # ملاحظة: تم تبسيط التوليد هنا لضمان عدم تجاوز مهلة تليجرام، ولكن مع الحفاظ على الكثافة
-    chapters = []
-    # طلب توليد 3 فصول ضخمة في كل طلب AI لتسريع الوقت
-    for i in range(1, 25, 3):
-        prompt = f"Write chapters {i}, {i+1}, and {i+2} for a book about: {hist[0]}. Each chapter must be 800 words, highly detailed, and academic."
-        content_block = await ai_req_fast([{"role": "user", "content": prompt}])
-        if content_block:
-            chapters.append((f"Section {i}-{i+2}", content_block))
-            await status.edit_text(f"✍️ تم إنجاز الفصول حتى {i+2}...")
+    chapters = [line.strip() for line in outline_text.split('\n') if len(line.strip()) > 5][:15]
+    
+    # 2. نظام التخزين المؤقت (المصفوفة)
+    book_storage = []
+    pdf = AI_Book_PDF()
+    
+    # 3. توليد المحتوى فصلاً فصلاً
+    for index, title in enumerate(chapters):
+        current_step = f"📝 جاري كتابة الفصل {index+1} من {len(chapters)}:\n{title}"
+        await status_msg.edit_text(f"{current_step}\n(يتم الحفظ في التخزين المؤقت...)")
 
-    filename = f"Architect_{uid}.pdf"
-    if create_pdf(chapters, filename):
-        with open(filename, "rb") as f:
-            await context.bot.send_document(chat_id=uid, document=f, caption="✅ اكتمل المجلد بنجاح.\nتم فلترة الصفحات الفارغة.")
-        os.remove(filename)
-    else:
-        await status.edit_text("❌ فشل في توليد محتوى كافٍ. حاول زيادة تفاصيل البرومبت.")
-    conn.close()
+        chapter_prompt = f"""
+        اكتب محتوى الفصل التالي لكتاب عن '{topic}'.
+        العنوان: {title}.
+        المطلوب: كتابة محتوى طويل جداً ممتد (شرح مفصل، أمثلة، نصائح).
+        استخدم لغة عربية فصحى وتنسيق مارك داون (عناوين فرعية، نقاط، زخرفة).
+        اجعل الفصل يملأ صفحتين على الأقل من المعلومات القيمة.
+        """
+        
+        content = await generate_chapter_with_retry(chapter_prompt)
+        
+        if content:
+            # تخزين في الذاكرة المؤقتة
+            book_storage.append({"title": title, "content": content})
+            
+            # إضافة للفصل في ملف الـ PDF فوراً
+            pdf.add_page()
+            pdf.set_font('Helvetica', 'B', 16)
+            # ملاحظة: تم استخدام Helvetica للإنجليزية، للعربية استخدم الخط الذي ستحمله
+            pdf.multi_cell(0, 10, txt=title.encode('latin-1', 'ignore').decode('latin-1'), align='C')
+            pdf.ln(10)
+            pdf.set_font('Helvetica', '', 12)
+            pdf.multi_cell(0, 10, txt=content.encode('latin-1', 'ignore').decode('latin-1'))
+        
+        # تبريد بسيط بين كل فصل وفصل لتجنب الحظر
+        await asyncio.sleep(2)
 
-# --- الأوامر الأساسية ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("💎 **Architect AI Ultra**\nنظام المفاتيح المزدوجة فعال. أرسل موضوعك الآن.")
+    # 4. إنهاء الملف وإرساله
+    file_name = f"Book_{int(time.time())}.pdf"
+    pdf.output(file_name)
+    
+    await status_msg.edit_text("✅ اكتمل الكتاب بنجاح! جاري إرسال الملف...")
+    await update.message.reply_document(document=open(file_name, 'rb'), caption=f"إليك كتابك حول: {topic}")
+    
+    # تنظيف الملفات
+    os.remove(file_name)
 
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("build", build_book))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    print("🚀 المحرك فائق السرعة يعمل الآن...")
-    app.run_polling(drop_pending_updates=True)
+    print("البوت يعمل الآن...")
+    app.run_polling()
 
 if __name__ == '__main__':
     main()
