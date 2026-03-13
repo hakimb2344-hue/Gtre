@@ -1,0 +1,7 @@
+# ========================
+# ForgeFlow Telegram Bot requirements
+# ========================
+
+python-telegram-bot==20.3
+openai
+requests
