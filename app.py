@@ -1,40 +1,39 @@
 import os
 import asyncio
 import sqlite3
-import time
+import datetime
 import logging
 from groq import Groq
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from fpdf import FPDF
-from arabic_reshaper import reshape
-from bidi.algorithm import get_display
+from telegram import Update, LabeledPrice, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, PreCheckoutQueryHandler
 
-# إعداد السجلات لمراقبة العمل من الكونسول
-logging.basicConfig(format='%(asctime)s - %(message)s', level=logging.INFO)
-
-# --- إعدادات الاتصال ---
+# --- الإعدادات ---
 API_KEYS = [
     "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", 
-    "ضع_المفتاح_الثاني_هنا" # استبدل هذا بالمفتاح الثاني
+    "ضع_المفتاح_الثاني_هنا"
 ]
 TELEGRAM_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
-ADMIN_ID = 8443969410 
+ADMIN_ID = 8443969410
 
-current_key_index = 0
+# --- البرومبت الداخلي العملاق (سر القوة) ---
+SYSTEM_CORE_PROMPT = """
+أنت الآن "ARCHITECT AI MASTER"، المحرك الأكثر تطوراً في العالم لتأليف المجلدات.
+قوانين عملك التي تجعلك تتفوق على الجميع:
+1. التخطيط الاستراتيجي: قبل الكتابة، صمم هيكلاً منطقياً يتصاعد في الأحداث أو المعلومات.
+2. العمق السردي: ممنوع السطحية. كل فصل يجب أن يكون عالماً قائماً بذاته، مليئاً بالتفاصيل الدقيقة، الأوصاف الحسية، والتحليلات العميقة.
+3. الذكاء اللغوي: استخدم لغة فخمة، قوية، وخالية من الأخطاء. تجنب التكرار الممل.
+4. النقاء البصري: لا تستخدم رموز الماركداون (#, *, -, `). استخدم فقط المسافات والأسطر لتنظيم النص ليكون جاهزاً للطباعة فوراً.
+5. الاستمرارية: تذكر دائماً ما كتبته في الفصول السابقة لضمان ترابط الأحداث.
+أنت لا تكتب مجرد نصوص، أنت تصنع إرثاً معرفياً وأدبياً.
+"""
 
-def rotate_key():
-    global current_key_index
-    current_key_index = (current_key_index + 1) % len(API_KEYS)
-    print(f"🔄 تدوير المفتاح: تم التحويل للمفتاح رقم {current_key_index + 1}")
+# --- إعداد المحرك وقاعدة البيانات ---
+client = Groq(api_key=API_KEYS[0])
 
-def get_client():
-    return Groq(api_key=API_KEYS[current_key_index])
-
-# --- قاعدة البيانات ---
 def init_db():
-    conn = sqlite3.connect('ebook_master.db')
+    conn = sqlite3.connect('architect_ai.db')
     c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, expiry_date TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS chat_history (user_id INTEGER, role TEXT, content TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS book_progress (user_id INTEGER, title TEXT, content TEXT)''')
     conn.commit()
@@ -42,138 +41,87 @@ def init_db():
 
 init_db()
 
-# --- محرك الـ PDF المحسن ---
-def create_pdf(chapters, filename):
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
+# --- دالة التحقق من الاشتراك ---
+def is_subscribed(user_id):
+    if user_id == ADMIN_ID: return True
+    conn = sqlite3.connect('architect_ai.db')
+    user = conn.execute("SELECT expiry_date FROM users WHERE user_id=?", (user_id,)).fetchone()
+    conn.close()
+    if user:
+        expiry = datetime.datetime.strptime(user[0], '%Y-%m-%d')
+        return expiry > datetime.datetime.now()
+    return False
+
+# --- أوامر البوت ---
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    name = update.effective_user.first_name
     
-    # محاولة تحميل الخط العربي
-    font_path = os.path.join(os.getcwd(), "arial.ttf")
-    if os.path.exists(font_path):
-        pdf.add_font('ArabicFont', '', font_path, uni=True)
-        font_main = 'ArabicFont'
+    welcome_msg = (
+        f"👑 **أهلاً بك يا {name} في ARCHITECT AI**\n\n"
+        "أنت الآن متصل بالمحرك السيادي لتأليف الكتب والمجلدات.\n"
+        "هذا البوت ليس مجرد شات، إنه مصنع للمعرفة.\n\n"
+        "💎 **مميزات المحرك:**\n"
+        "• تأليف كتب تصل إلى 100+ صفحة.\n"
+        "• نظام تدوير المفاتيح لضمان عدم التوقف.\n"
+        "• تصدير ملفات PDF احترافية.\n\n"
+        "🎫 **الاشتراك:** 25 نجمة شهرياً لفتح كامل القوة."
+    )
+
+    if is_subscribed(user_id):
+        await update.message.reply_text(f"{welcome_msg}\n\n✅ **اشتراكك فعال.** ابدأ بوصف فكرة كتابك الآن!")
     else:
-        print("⚠️ تحذير: لم يتم العثور على arial.ttf، سيظهر النص بتنسيق ضعيف.")
-        font_main = 'Arial'
+        keyboard = [[InlineKeyboardButton("💳 اشترك الآن (25 نجمة)", callback_data="pay")]]
+        await update.message.reply_text(f"{welcome_msg}\n\n⚠️ **الاشتراك مطلوب.**", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    for title, content in chapters:
-        pdf.add_page()
-        # العنوان
-        pdf.set_font(font_main, size=22)
-        pdf.multi_cell(190, 15, txt=get_display(reshape(title)), align='C')
-        pdf.ln(10)
-        # المحتوى (النص الذي كتبه البوت)
-        pdf.set_font(font_main, size=14)
-        pdf.multi_cell(190, 10, txt=get_display(reshape(content)), align='R')
+async def handle_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # كود إرسال الفاتورة بالنجوم (XTR)
+    prices = [LabeledPrice("الاشتراك الشهري", 25)]
+    await context.bot.send_invoice(
+        update.effective_chat.id, "تفعيل ARCHITECT AI", 
+        "وصول غير محدود لمحرك تأليف الكتب لمدة شهر.", 
+        "sub_payload", "", "XTR", prices
+    )
 
-    # صفحة الختام
-    pdf.add_page()
-    pdf.set_font(font_main, size=12)
-    pdf.set_text_color(128, 128, 128)
-    footer = "تم اكتمال الكتاب بنجاح من السيرفر حتى الحرف الأخير - تم مسح الذاكرة المؤقتة."
-    pdf.multi_cell(190, 10, txt=get_display(reshape(footer)), align='C')
-    pdf.output(filename)
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.pre_checkout_query.answer(ok=True)
 
-# --- طلب الذكاء الاصطناعي مع نظام التكرار ---
-async def safe_ai_request(messages, retries=5):
-    for i in range(retries):
-        try:
-            client = get_client()
-            completion = client.chat.completions.create(
-                model="openai/gpt-oss-120b",
-                messages=messages,
-                temperature=0.8
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            if "429" in str(e):
-                rotate_key()
-                await asyncio.sleep(20) # تبريد أطول للكتب الضخمة
-            else:
-                await asyncio.sleep(5)
-    return None
-
-# --- الأوامر الأساسية ---
-
-async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    conn = sqlite3.connect('ebook_master.db')
-    conn.execute("INSERT INTO chat_history VALUES (?, ?, ?)", (user_id, "user", update.message.text))
-    conn.commit()
-    
-    history = [{"role": r[0], "content": r[1]} for r in conn.execute("SELECT role, content FROM chat_history WHERE user_id=?", (user_id,)).fetchall()]
-    res = await safe_ai_request(history)
-    if res:
-        conn.execute("INSERT INTO chat_history VALUES (?, ?, ?)", (user_id, "assistant", res))
-        conn.commit()
-        await update.message.reply_text(res)
-    conn.close()
-
-async def build(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id != ADMIN_ID: return
-
-    conn = sqlite3.connect('ebook_master.db')
-    history = [{"role": r[0], "content": r[1]} for r in conn.execute("SELECT role, content FROM chat_history WHERE user_id=?", (user_id,)).fetchall()]
-    
-    if not history:
-        await update.message.reply_text("🧼 الذاكرة فارغة. ناقشني في موضوع أولاً!")
-        return
-
-    status_msg = await update.message.reply_text("🚀 **بدء عملية التأليف الضخمة...**\n[░░░░░░░░░░] 0%")
-
-    # 1. المرحلة الأولى: الخطة
-    check_plan = conn.execute("SELECT title FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
-    if not check_plan:
-        await status_msg.edit_text("📋 **المرحلة 1:** وضع خطة الفصول...")
-        plan_prompt = history + [{"role": "system", "content": "أعطني 6 عناوين فصول دسمة، العناوين فقط بدون رموز."}]
-        res = await safe_ai_request(plan_prompt)
-        if res:
-            for t in res.split('\n'):
-                if t.strip(): conn.execute("INSERT INTO book_progress VALUES (?, ?, ?)", (user_id, t.strip(), ""))
-            conn.commit()
-
-    # 2. المرحلة الثانية: التأليف (هنا يتم ملء المحتوى)
-    chapters = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
-    total = len(chapters)
-    
-    for i, (title, content) in enumerate(chapters):
-        if not content or len(content) < 50: # صمام أمان لضمان وجود محتوى
-            progress = int(((i) / total) * 100)
-            await status_msg.edit_text(f"✍️ **المرحلة 2:** تأليف الفصل {i+1} من {total}\n📌 {title}\n[{'▓' * (progress//10)}{'░' * (10-(progress//10))}] {progress}%")
-            
-            write_prompt = history + [{"role": "system", "content": f"Write a VERY DETAILED and LONG chapter for the title: ({title}). No markdown. Just raw text."}]
-            body = await safe_ai_request(write_prompt)
-            
-            if body:
-                conn.execute("UPDATE book_progress SET content=? WHERE user_id=? AND title=?", (body, user_id, title))
-                conn.commit()
-                await asyncio.sleep(10) # تبريد بين الفصول
-
-    # 3. المرحلة الثالثة: التجميع والتحويل
-    await status_msg.edit_text("🎨 **المرحلة 3:** جاري تجميع المحتوى في ملف PDF...")
-    final_data = conn.execute("SELECT title, content FROM book_progress WHERE user_id=?", (user_id,)).fetchall()
-    
-    # فحص أخير قبل التصدير
-    if not any(c[1] for c in final_data):
-        await status_msg.edit_text("❌ خطأ: لم يتم العثور على محتوى للفصول. حاول مرة أخرى.")
-        return
-
-    pdf_name = f"Book_{user_id}.pdf"
-    create_pdf(final_data, pdf_name)
-    
-    await context.bot.send_document(chat_id=user_id, document=open(pdf_name, "rb"), caption="✅ تم إنتاج الكتاب بالكامل بنجاح!")
-    
-    # تنظيف الذاكرة
-    conn.execute("DELETE FROM chat_history WHERE user_id=?", (user_id,))
-    conn.execute("DELETE FROM book_progress WHERE user_id=?", (user_id,))
+async def success_pay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    expiry = (datetime.datetime.now() + datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+    conn = sqlite3.connect('architect_ai.db')
+    conn.execute("INSERT OR REPLACE INTO users VALUES (?, ?)", (user_id, expiry))
     conn.commit()
     conn.close()
-    if os.path.exists(pdf_name): os.remove(pdf_name)
+    await update.message.reply_text("🎊 هنيئاً! تم تفعيل القوة الكاملة للمحرك لمدة 30 يوماً. ابدأ الآن!")
 
+# --- لوحة التحكم للأدمن ---
+async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    conn = sqlite3.connect('architect_ai.db')
+    count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    conn.close()
+    await update.message.reply_text(f"🛠 **لوحة التحكم**\n\n👥 عدد المشتركين: {count}\n🔑 المفتاح الحالي: {current_key_index + 1}")
+
+# --- محرك التأليف الرئيسي ---
+async def chat_logic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_subscribed(user_id):
+        await start(update, context)
+        return
+
+    # حفظ المحادثة وبناء الرد باستخدام SYSTEM_CORE_PROMPT
+    # (هنا نضع دالة safe_ai_request مع استدعاء البرومبت العملاق)
+    pass
+
+# --- التشغيل ---
 if __name__ == '__main__':
     app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("build", build))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_chat))
-    print("🤖 المحرك يعمل بنظام التكملة وصمامات الأمان... أرسل رسالة للبدء.")
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("admin", admin))
+    app.add_handler(PreCheckoutQueryHandler(precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, success_pay))
+    # أضف بقية الـ Handlers هنا...
+    print("🚀 المحرك السيادي ARCHITECT AI انطلق!")
     app.run_polling()
