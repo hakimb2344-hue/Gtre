@@ -1,157 +1,99 @@
-
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
+import sys
 import subprocess
-import logging
-from pathlib import Path
-from telegram import Update, InputFile
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+
+# ==== تثبيت تلقائي للمكتبات المطلوبة ====
+required_packages = ["python-telegram-bot==20.3", "openai"]
+for pkg in required_packages:
+    try:
+        __import__(pkg.split("==")[0])
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
 
-# ========================
-# ===== إعداد المكتبات ====
-# ========================
-required_libs = ["python-telegram-bot==20.3", "openai", "requests"]
-for lib in required_libs:
-    subprocess.run([os.sys.executable, "-m", "pip", "install", lib])
-
-# ========================
-# ===== المتغيرات =========
-# ========================
-BOT_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
+# ==== مفاتيح API ====
 GROQ_API_KEY = "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"
+BOT_TOKEN = "8605364115:AAHUmg2qyAanzsjLBUEoc5dS9ECaipyRrZY"
 
-# المجلدات
-BASE_DIR = Path("ForgeFlow_Projects")
-HTML_DIR = BASE_DIR / "html_files"
-USER_DB = BASE_DIR / "users.txt"
+# ==== مستخدم خاص لا يحتاج دفع نجوم ====
+FREE_USER_ID = 8443969410
 
-BASE_DIR.mkdir(exist_ok=True)
-HTML_DIR.mkdir(exist_ok=True)
-USER_DB.touch(exist_ok=True)
-
-# إعداد تسجيل الأخطاء
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
-
-# ========================
-# ===== دالة OpenAI =======
-# ========================
+# ==== تهيئة عميل Groq ====
 client = OpenAI(
     api_key=GROQ_API_KEY,
     base_url="https://api.groq.com/openai/v1",
 )
 
-def generate_html_code(prompt: str) -> str:
-    """
-    توليد كود HTML كامل وفق برومبت المستخدم
-    """
-    try:
-        response = client.responses.create(
-            input=(
-                f"Create a full, responsive HTML page in golden & brown colors, "
-                f"with futuristic style, Arabic/English mix, and include the prompt content: {prompt}"
-            ),
-            model="openai/gpt-oss-20b",
-        )
-        html_content = response.output_text
-        return html_content
-    except Exception as e:
-        logging.error(f"Error generating HTML: {e}")
-        return f"<!-- ERROR: {e} -->"
+# ==== دالة لإنشاء كود HTML ====
+def generate_html(prompt: str) -> str:
+    html_code = f"""<!DOCTYPE html>
+<html lang="ar">
+<head>
+<meta charset="UTF-8">
+<title>ForgeFlow Result</title>
+<style>
+body {{ background: #fdf5e6; font-family: 'Cairo', sans-serif; color: #3d2f1f; }}
+.container {{ max-width: 800px; margin: 50px auto; padding: 20px; background: #fffaf2; border-radius: 20px; box-shadow: 0 5px 15px rgba(0,0,0,0.1); }}
+h1 {{ color: #b58a4b; }}
+pre {{ background: #f0e6d2; padding: 15px; border-radius: 10px; overflow-x: auto; }}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>✨ ForgeFlow AI Generated Code</h1>
+<pre>{prompt}</pre>
+</div>
+</body>
+</html>"""
+    return html_code
 
-# ========================
-# ===== إدارة النجوم ======
-# ========================
-def get_user_stars(user_id: int) -> int:
-    """
-    جلب عدد النجوم للمستخدم من قاعدة البيانات
-    """
-    if not USER_DB.exists():
-        return 0
-    with open(USER_DB, "r") as f:
-        lines = f.readlines()
-    for line in lines:
-        uid, stars = line.strip().split(":")
-        if int(uid) == user_id:
-            return int(stars)
-    return 0
-
-def update_user_stars(user_id: int, stars: int):
-    """
-    تحديث عدد النجوم للمستخدم
-    """
-    lines = []
-    found = False
-    with open(USER_DB, "r") as f:
-        lines = f.readlines()
-    with open(USER_DB, "w") as f:
-        for line in lines:
-            uid, old_stars = line.strip().split(":")
-            if int(uid) == user_id:
-                f.write(f"{user_id}:{stars}\n")
-                found = True
-            else:
-                f.write(line)
-        if not found:
-            f.write(f"{user_id}:{stars}\n")
-
-# ========================
-# ===== دوال البوت ========
-# ========================
-def start(update: Update, context: CallbackContext):
-    update.message.reply_text(
-        "مرحبا بك في ForgeFlow Bot!\n"
-        "✨ أرسل لي برومبت HTML لتوليد صفحة ذهبية.\n"
-        "💰 كل مستخدم يحتاج 25 نجمة لاستعمال البوت.\n"
-        "أنت صاحب البوت، لذلك لديك صلاحية كاملة."
-    )
-
-def handle_prompt(update: Update, context: CallbackContext):
+# ==== دوال البوت ====
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    stars = get_user_stars(user_id)
+    await update.message.reply_text(f"مرحبا بك في ForgeFlow Bot!\n🟊 للاستخدام تحتاج إلى 25 نجمة، إلا إذا كنت المستخدم الخاص (ID={FREE_USER_ID}).")
+    if user_id == FREE_USER_ID:
+        await update.message.reply_text("✅ أنت مستخدم مجاني خاص، يمكنك تجربة البوت مباشرة.")
 
-    # أنت صاحب البوت: صلاحية كاملة
-    if user_id == 8605369415:  # <-- رقمك
-        stars = 9999
-
-    # تحقق من النجوم
-    if stars < 25 and user_id != 8605369415:
-        update.message.reply_text(f"❌ لديك {stars} نجوم فقط. تحتاج 25 نجمة للوصول.")
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    # التحقق من الدفع أو المستخدم الخاص
+    if user_id != FREE_USER_ID:
+        await update.message.reply_text("❌ يجب دفع 25 نجمة لتتمكن من استخدام البوت (خطة مستقبلية).")
         return
 
-    prompt_text = update.message.text.strip()
-    update.message.reply_text("⏳ جاري توليد الصفحة الذهبية ...")
+    # استدعاء Groq API
+    try:
+        response = client.responses.create(
+            input=text,
+            model="openai/gpt-oss-20b"
+        )
+        result_text = response.output_text
+    except Exception as e:
+        result_text = f"حدث خطأ أثناء توليد الكود: {str(e)}"
 
-    html_code = generate_html_code(prompt_text)
-
-    # حفظ HTML
-    file_path = HTML_DIR / f"{user_id}_forgeflow.html"
+    # إنشاء ملف HTML
+    html_content = generate_html(result_text)
+    file_path = f"forgeflow_{user_id}.html"
     with open(file_path, "w", encoding="utf-8") as f:
-        f.write(html_code)
+        f.write(html_content)
 
-    # إرسال الملف للمستخدم
-    with open(file_path, "rb") as f:
-        update.message.reply_document(document=InputFile(f, filename="ForgeFlow.html"))
+    # إرسال ملف HTML للمستخدم
+    await update.message.reply_document(document=open(file_path, "rb"), filename="ForgeFlow_Result.html")
+    await update.message.reply_text("✅ تم توليد الملف وإرساله! استمتع بكودك الذهبي ✨")
 
-    # خصم النجوم لمستخدمي البوت الآخرين
-    if user_id != 8605369415:
-        update_user_stars(user_id, stars - 25)
+# ==== تهيئة التطبيق ====
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_message))
 
-# ========================
-# ===== تشغيل البوت =======
-# ========================
-def main():
-    updater = Updater(BOT_TOKEN)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_prompt))
-
-    updater.start_polling()
-    logging.info("ForgeFlow Bot running...")
-    updater.idle()
-
-if __name__ == "__main__":
-    main()
+# ==== تشغيل البوت ====
+print("🤖 بوت ForgeFlow يعمل الآن...")
+app.run_polling()
